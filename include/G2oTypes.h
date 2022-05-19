@@ -162,6 +162,7 @@ public:
     }
 };
 
+// xc's todo: 这个节点是在哪里使用的
 // 优化中关于位姿的节点，4自由度  3个平移加一个航偏
 class VertexPose4DoF : public g2o::BaseVertex<4, ImuCamPose>
 {
@@ -228,6 +229,7 @@ public:
         Eigen::Vector3d uv;
         uv << update_[0], update_[1], update_[2];
         setEstimate(estimate() + uv);
+        // 或者_estimate = _estimate + uv
     }
 };
 
@@ -284,7 +286,13 @@ public:
 };
 
 // Gravity direction vertex
-// 重力方向
+/**
+ * notes:
+ *      1. Rwg表示的是当前IMU世界系下的g1 = (0, 0, -1)到当前IMU世界系下重力表示g2的变换矩阵，也就是g2 = Rwg * g1
+ *      2. 简化运算就是计算轴角，其方向为g1叉乘g2，大小可以通过g1与g2的夹角cos获得
+ *      3. 在上面的计算中，由于已知了g1，那么轴角方向必定在垂直g1的方向上，也就是方向为(a, b, 0)
+ *      4. 由于已知了g1，使得优化的自由度不再是3自由度，这也是下面顶点自由度以及扰动更新时候计算方法的原因
+ */
 class GDirection
 {
 public:
@@ -294,6 +302,7 @@ public:
 
     void Update(const double *pu)
     {
+        // xc's todo: 查看重力的建模方式，才能明白这里为什么仅使用前两个维度来进行更新操作
         Rwg = Rwg * ExpSO3(pu[0], pu[1], 0.0);
     }
 
@@ -305,6 +314,8 @@ public:
 /** 
  * @brief 重力方向节点
  */
+
+// xc's todo: 查看重力的建模方式，明确这里的自由度为什么是2
 class VertexGDir : public g2o::BaseVertex<2, GDirection>
 {
 public:
@@ -328,6 +339,8 @@ public:
         updateCache();
     }
 };
+
+// notes: 如果更新使用的是Update函数，那么就是使用updateCache进行加速，如果使用setEstimate函数进行更新，就不使用updateCache
 
 // scale vertex
 /** 
@@ -356,6 +369,7 @@ public:
 
     virtual void oplusImpl(const double *update_)
     {
+        // xc's todo: 查看尺度的建模方式，才能明白这里的更新方式是为什么？
         setEstimate(estimate() * exp(*update_));
     }
 };
@@ -478,6 +492,7 @@ public:
         return VPose->estimate().isDepthPositive(Xw, cam_idx);
     }
 
+    // xc's todo: 后面需要查看这个函数的作用是什么？
     Eigen::Matrix<double, 6, 6> GetHessian()
     {
         linearizeOplus();
@@ -571,7 +586,7 @@ public:
 /** 
  * @brief 惯性边（误差为残差）
  */
-class EdgeInertial : public g2o::BaseMultiEdge<9, Vector9d>
+class EdgeInertial : public g2o::BaseMultiEdge<9, Vector9d>  //  不需要指定定点类型了
 {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -598,7 +613,7 @@ public:
         return J.transpose() * information() * J;
     }
 
-    // 没用
+    // 不含pose1的hessian矩阵
     Eigen::Matrix<double, 18, 18> GetHessianNoPose1()
     {
         linearizeOplus();
@@ -611,7 +626,7 @@ public:
         return J.transpose() * information() * J;
     }
 
-    // 关于pose2 的旋转平移信息矩阵
+    // 关于pose2 的旋转平移和速度信息矩阵
     Eigen::Matrix<double, 9, 9> GetHessian2()
     {
         linearizeOplus();
@@ -730,6 +745,8 @@ public:
 
 /** 
  * @brief 陀螺仪偏置的二元边，除了残差及重投影误差外的第三个边，控制偏置变化
+ * 
+ * notes: 确保两个陀螺仪的偏置接近
  */
 class EdgeGyroRW : public g2o::BaseBinaryEdge<3, Eigen::Vector3d, VertexGyroBias, VertexGyroBias>
 {
@@ -772,6 +789,8 @@ public:
 
 /** 
  * @brief 加速度计偏置的二元边，除了残差及重投影误差外的第三个边，控制偏置变化
+ * 
+ * notes: 确保两个加速度计的偏置接近
  */
 class EdgeAccRW : public g2o::BaseBinaryEdge<3, Eigen::Vector3d, VertexAccBias, VertexAccBias>
 {
@@ -815,6 +834,22 @@ public:
 /** 
  * @brief 先验类
  */
+/**
+ * notes:
+ *      1. 这里的H的实际含义是Hessian Matrix，但是在构建边的约束的时候，会被设置成information matrix
+ *      2. 在PoseInertialOptimizationLastFrame优化中，我们实际上求解的是以下问题：
+ *                      min||g(x1, x2)||^2 且 min||x1 - x0||^2
+ *         其中x0是之前保存的上一次优化的值，H是约束min||x1 - x0||^2的information matrix；
+ *         不妨令上一次优化的约束为：min||f(x1)||^2，其求解结果为x0；其求解过程为一直迭代J1.t() * H1 * J1 * delta_x1 = b1；
+ *         然而在PoseInertialOptimizationLastFrame问题中，约束min||x1 - x0||^2对应的求解迭代过程为：
+ *                      J2.t() * H2 * J2 * delta_x1 = b2；
+ *         很容易知道：J2 = I（如果使用求导模型的话），上式也就是等价于H2 * delta_x1 = b2；
+ *         我们在PoseInertialOptimizationLastFrame问题中构建min||x1 - x0||^2这个约束的目的在于使其约束x1在x0附近；也就是产生等价于
+ *         min||f(x1)||^2的效果；从优化迭代求解的原理看，就是希望J1.t() * H1 * J1 * delta_x1 = b1与H2 * delta_x1 = b2近似
+ *         因此，有H2 = J1.t() * H1 * J1，这也是为什么先验约束的information matrix等于上一次约束中的Hessian matrix的原因
+ *      3. 从以上分析我们可以看出，这里并不是经典的边缘化（用于滑窗，降低运算量）操作过程，而更像是为了保留上一次的约束而做的操作，更加对应于其论文中的Prior
+ *      4. 所以请不要将其视为边缘化来看待，注释和变量命名可能有误导，请将其看成Prior
+ */
 class ConstraintPoseImu
 {
 public:
@@ -831,6 +866,7 @@ public:
         Eigen::Matrix<double, 15, 1> eigs = es.eigenvalues();
         for (int i = 0; i < 15; i++)
             if (eigs[i] < 1e-12)
+                // xc's todo: 从效果上看，好像只是简化了计算，对极小数不参与运算，认为极小数是浮点数运算得到的，实际上H已经退化了
                 eigs[i] = 0;
         H = es.eigenvectors() * eigs.asDiagonal() * es.eigenvectors().transpose();
     }
@@ -845,6 +881,11 @@ public:
 
 /** 
  * @brief 先验边，前端优化单帧用到
+ *
+ * notes:
+ *      1. 在tracklocalMap中，对单帧的优化中，如果地图没有更新，实际上是对连续两个普通帧的优化
+ *      2. 这里实际上就是限制了当前帧的前一帧的优化范围而已
+ *      3. 参考论文：Visual-Inertial Monocular SLAM with Map Reuse
  */
 class EdgePriorPoseImu : public g2o::BaseMultiEdge<15, Vector15d>
 {

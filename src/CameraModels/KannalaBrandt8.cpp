@@ -169,7 +169,7 @@ Eigen::Vector3f KannalaBrandt8::unprojectEig(const cv::Point2f &p2D)
  * 这里θd = θ + k1*θ^3 + k2*θ^5 + k3*θ^7 + k4*θ^9
  * 直接求解θ比较麻烦，这里用迭代的方式通过误差的一阶导数求θ
  * θ的初始值定为了θd，设θ + k1*θ^3 + k2*θ^5 + k3*θ^7 + k4*θ^9 = f(θ)
- * e(θ) = f(θ) - θd 目标是求解一个θ值另e(θ) = 0
+ * e(θ) = f(θ) - θd 目标是求解一个θ值另e(θ) = 0，实际上任然可以看成是||e(θ)||^2的最优化，按照正常的高斯牛顿进行求解即可得到下面的公式
  * 泰勒展开e(θ+δθ) = e(θ) + e`(θ) * δθ = 0
  * e`(θ) = 1 + 3*k1*θ^*2 + 5*k2*θ^4 + 7*k3*θ^6 + 8*k4*θ^8
  * δθ = -e(θ)/e`(θ) 经过多次迭代可求得θ
@@ -182,7 +182,14 @@ cv::Point3f KannalaBrandt8::unproject(const cv::Point2f &p2D)
     // Use Newthon method to solve for theta with good precision (err ~ e-6)
     cv::Point2f pw((p2D.x - mvParameters[2]) / mvParameters[0], (p2D.y - mvParameters[3]) / mvParameters[1]);
     float scale = 1.f;
-    float theta_d = sqrtf(pw.x * pw.x + pw.y * pw.y);  // sin(psi) = yc / r
+    float theta_d = sqrtf(pw.x * pw.x + pw.y * pw.y);
+    // notes: theta_d >= 0 > -CV_PI一定成立
+    // xc's todo: 这里的判断是什么意思，超过了CV_PI / 2的话，theta_d = CV_PI / 2了，这种时候能够直接进行运算吗？
+    /**
+     * notes:
+     *      1. 这个地方疑似是个bug，应该是theta = fminf(fmaxf(-CV_PI / 2.f, theta_d), CV_PI / 2.f);目的是给与theta一个比较好的初值，但是theta为入射角，取值范围在0~pi/2
+     *      2. 另外如果这么修改的话，就需要将if中国中的float theta = theta_d;删除
+     */
     theta_d = fminf(fmaxf(-CV_PI / 2.f, theta_d), CV_PI / 2.f);  // 不能超过180度
 
     if (theta_d > 1e-8)
@@ -204,7 +211,7 @@ cv::Point3f KannalaBrandt8::unproject(const cv::Point2f &p2D)
                   k3_theta8 = mvParameters[7] * theta8;
             float theta_fix = (theta * (1 + k0_theta2 + k1_theta4 + k2_theta6 + k3_theta8) - theta_d) /
                                 (1 + 3 * k0_theta2 + 5 * k1_theta4 + 7 * k2_theta6 + 9 * k3_theta8);
-            theta = theta - theta_fix;
+            theta = theta - theta_fix;  // Gauss-Newton迭代公式
             if (fabsf(theta_fix) < precision)  // 如果更新量变得很小，表示接近最终值
                 break;
         }
@@ -212,7 +219,13 @@ cv::Point3f KannalaBrandt8::unproject(const cv::Point2f &p2D)
         // 求得tan(θ) / θd
         scale = std::tan(theta) / theta_d;
     }
-
+    /**
+     * theta_d极小，说明theta极小，直接使用极限进行运算即可
+     * 
+     * 1. xc = xd * r / θd  yc = yd * r / θd
+     * 2. r / θd = tan(θ) / (k0*θ + k1*θ^3 + k2*θ^5 + k3*θ^7 + k4*θ^9) →(θ→0) = 1 / k0 = 1
+     * 3. 因此xc = xd, yc = yd
+     */
     return cv::Point3f(pw.x * scale, pw.y * scale, 1.f);
 }
 
@@ -278,6 +291,7 @@ bool KannalaBrandt8::ReconstructWithTwoViews(
     }
 
     // Correct FishEye distortion
+    // notes: 只有在针孔模型的时候才会在构造Frame的时候进行去畸变的操作
     std::vector<cv::KeyPoint> vKeysUn1 = vKeys1, vKeysUn2 = vKeys2;
     std::vector<cv::Point2f> vPts1(vKeys1.size()), vPts2(vKeys2.size());
 
@@ -323,6 +337,7 @@ bool KannalaBrandt8::epipolarConstrain(GeometricCamera *pCamera2, const cv::KeyP
                                         const Eigen::Matrix3f &R12, const Eigen::Vector3f &t12, const float sigmaLevel, const float unc)
 {
     Eigen::Vector3f p3D;
+    // 实际上没有做极线约束，计算的是射线角度
     return this->TriangulateMatches(pCamera2, kp1, kp2, R12, t12, sigmaLevel, unc, p3D) > 0.0001f;
 }
 
@@ -331,6 +346,7 @@ bool KannalaBrandt8::matchAndtriangulate(const cv::KeyPoint &kp1, const cv::KeyP
                                             const float sigmaLevel1, const float sigmaLevel2,
                                             Eigen::Vector3f &x3Dtriangulated)
 {
+    // 两个不一定类型相同的相机，只要推倒到相机系下就可以运算了，区别无非是投影模型
     Eigen::Matrix<float, 3, 4> eigTcw1 = Tcw1.matrix3x4();
     Eigen::Matrix3f Rcw1 = eigTcw1.block<3, 3>(0, 0);
     Eigen::Matrix3f Rwc1 = Rcw1.transpose();

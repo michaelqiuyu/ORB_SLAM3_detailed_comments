@@ -59,6 +59,7 @@ ImuCamPose::ImuCamPose(KeyFrame *pKF):its(0)
 
     if(num_cams>1)
     {
+        // 双目情形，并一直left→right的变换
         Eigen::Matrix4d Trl = pKF->GetRelativePoseTrl().matrix().cast<double>();
         Rcw[1] = Trl.block<3,3>(0,0) * Rcw[0];
         tcw[1] = Trl.block<3,3>(0,0) * tcw[0] + Trl.block<3,1>(0,3);
@@ -131,6 +132,7 @@ ImuCamPose::ImuCamPose(Frame *pF):its(0)
  */
 ImuCamPose::ImuCamPose(Eigen::Matrix3d &_Rwc, Eigen::Vector3d &_twc, KeyFrame* pKF): its(0)
 {
+    // notes: 使用的是传入的R，t，而不是pKF的位姿
     // This is only for posegrpah, we do not care about multicamera
     tcw.resize(1);
     Rcw.resize(1);
@@ -176,6 +178,7 @@ void ImuCamPose::SetParam(
         Rcb[i] = Rbc[i].transpose();
         tcb[i] = -Rcb[i]*tbc[i];
     }
+    // notes: 明确哪些是Eigen，哪些是vector<Eigen>
     Rwb = Rcw[0].transpose()*Rcb[0];
     twb = Rcw[0].transpose()*(tcb[0]-tcw[0]);
 
@@ -202,8 +205,8 @@ Eigen::Vector3d ImuCamPose::ProjectStereo(const Eigen::Vector3d &Xw, int cam_idx
     Eigen::Vector3d pc;
     double invZ = 1/Pc(2);
     pc.head(2) = pCamera[cam_idx]->project(Pc);
-    pc(2) = pc(0) - bf*invZ;
-    return pc;
+    pc(2) = pc(0) - bf*invZ;  // 计算的是ur
+    return pc;  // ul vl ur
 }
 
 /** 
@@ -211,7 +214,7 @@ Eigen::Vector3d ImuCamPose::ProjectStereo(const Eigen::Vector3d &Xw, int cam_idx
  */
 bool ImuCamPose::isDepthPositive(const Eigen::Vector3d &Xw, int cam_idx) const
 {
-    return (Rcw[cam_idx].row(2) * Xw + tcw[cam_idx](2)) > 0.0;
+    return (Rcw[cam_idx].row(2) * Xw + tcw[cam_idx](2)) > 0.0;  // 相机系下的深度是否为正
 }
 
 /** 
@@ -225,6 +228,7 @@ void ImuCamPose::Update(const double *pu)
     ut << pu[3], pu[4], pu[5];
 
     // Update body pose
+    // 查看邱晓晨的文档
     twb += Rwb * ut;
     Rwb = Rwb * ExpSO3(ur);
 
@@ -266,12 +270,14 @@ void ImuCamPose::UpdateW(const double *pu)
     its++;
     if(its>=5)
     {
+        // 对于轴角方向为(0, 0, 1)，其对应的旋转矩阵的DR(0,2)、DR(0,2)、DR(0,2)、DR(2,1)均为0
         DR(0,2) = 0.0;
-        DR(1,2) = 0.0;
-        DR(2,0) = 0.0;
+        DR(0,2) = 0.0;
+        DR(0,2) = 0.0;
         DR(2,1) = 0.0;
         NormalizeRotation(DR);
         its = 0;
+        // 只要修正DR就可以修正Rwb了，因为Rwb0不变
     }
 
     // Update camera pose
@@ -296,6 +302,7 @@ void InvDepthPoint::Update(const double *pu)
     rho += *pu;
 }
 
+// xc's todo: 在哪里使用了这两个函数
 /** 
  * @brief 写入状态量
  */
@@ -394,9 +401,17 @@ void EdgeMono::linearizeOplus()
     const Eigen::Matrix3d &Rcw = VPose->estimate().Rcw[cam_idx];
     const Eigen::Vector3d &tcw = VPose->estimate().tcw[cam_idx];
     const Eigen::Vector3d Xc = Rcw*VPoint->estimate() + tcw;
+    // 这里的Xb应该也可以直接由Tbw计算得到
     const Eigen::Vector3d Xb = VPose->estimate().Rbc[cam_idx]*Xc+VPose->estimate().tbc[cam_idx];
     const Eigen::Matrix3d &Rcb = VPose->estimate().Rcb[cam_idx];
 
+    /**
+     * notes:
+     *      1. 优化的是Rbw，因此投影过程为K * Tcb * Tbw * Pw
+     *      2. 令p1 = Tcb * Tbw * Pw = Tcw * Pw
+     *      3. 令p2 = Tbw * Pw
+     *      4. 根据链式求导即可得到下面的结果
+     */
     const Eigen::Matrix<double,2,3> proj_jac = VPose->estimate().pCamera[cam_idx]->projectJac(Xc);
     _jacobianOplusXi = -proj_jac * Rcw;
 
@@ -456,6 +471,10 @@ void EdgeStereo::linearizeOplus()
     const double bf = VPose->estimate().bf;
     const double inv_z2 = 1.0/(Xc(2)*Xc(2));
 
+    /**
+     * ur = ul - fb / z
+     * 根据上面的公式求解ur对x, y, z的导数
+     */
     Eigen::Matrix<double,3,3> proj_jac;
     proj_jac.block<2,3>(0,0) = VPose->estimate().pCamera[cam_idx]->projectJac(Xc);
     proj_jac.block<1,3>(2,0) = proj_jac.block<1,3>(0,0);
@@ -557,14 +576,25 @@ EdgeInertial::EdgeInertial(IMU::Preintegrated *pInt):JRg(pInt->JRg.cast<double>(
     g << 0, 0, -IMU::GRAVITY_VALUE;
 
     // 2. 读取协方差矩阵的前9*9部分的逆矩阵，该部分表示的是预积分测量噪声的协方差矩阵
+    /**
+     * notes:
+     *      1. 这里C.block<9, 9>不一定是非奇异矩阵，因此这里的操作应该修改为对C.block<9, 9>做特征值分解，并利用特征值分解求逆
+     *      2. 也就是对A求特征值分解，A = p * diag * p.t→A.inv = p * diag.inv * p，且diag(i) = 0时，令diag.inv(i) = 0，这样做的理由如下
+     *
+     * 为了说明这样操作的理由，不妨举一个特殊的例子，info = diag(a1, a2, ..., an)，ai表示方差，如果ai≠0，那么
+     * J = (e1.t, e2.t, ..., en.t).t，J.t * info * J = ∑ei.t * ei / ai
+     * ai等于0，也就是方差为0，也就是没有波动，此时不考虑误差项ei.t * ei，因此直接将1/ai令为0即可
+     */
     Matrix9d Info = pInt->C.block<9,9>(0,0).cast<double>().inverse();
     // 3. 强制让其成为对角矩阵
+    // 理论上Info就是一个对称矩阵，由于浮点数误差，可能变成非对称矩阵了
     Info = (Info+Info.transpose())/2;
     // 4. 让特征值很小的时候置为0，再重新计算信息矩阵（暂不知这么操作的目的是什么，先搞清楚操作流程吧）
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,9,9> > es(Info);
     Eigen::Matrix<double,9,1> eigs = es.eigenvalues();
     for(int i=0;i<9;i++)
         if(eigs[i]<1e-12)
+            // 太小，说明矩阵退化了，这里的很小的浮点数可能是浮点数运算误差带来的，直接变为0即可，也可以避免某些无用的运算
             eigs[i]=0;
     // asDiagonal 生成对角矩阵
     Info = es.eigenvectors()*eigs.asDiagonal()*es.eigenvectors().transpose();
@@ -621,6 +651,7 @@ void EdgeInertial::linearizeOplus()
     const Eigen::Vector3d er = LogSO3(eR);                      // r△φij
     const Eigen::Matrix3d invJr = InverseRightJacobianSO3(er);  // Jr^-1(log(△Rij))
 
+    // 这里可以直接参考邱笑晨的文档，公式完全一样
     // 就很神奇，_jacobianOplus个数等于边的个数，里面的大小等于观测值维度（也就是残差）× 每个节点待优化值的维度
     // Jacobians wrt Pose 1
     // _jacobianOplus[0] 9*6矩阵 总体来说就是三个残差分别对pose1的旋转与平移（p）求导
@@ -678,7 +709,7 @@ EdgeInertialGS::EdgeInertialGS(IMU::Preintegrated *pInt):JRg(pInt->JRg.cast<doub
     // 准备工作，把预积分类里面的值先取出来，包含信息的是两帧之间n多个imu信息预积分来的
     // This edge links 8 vertices
     // 8元边
-    resize(8);
+    resize(8);  // 多了尺度和重力
     // 1. 定义重力
     gI << 0, 0, -IMU::GRAVITY_VALUE;
 
@@ -727,6 +758,7 @@ void EdgeInertialGS::computeError()
 }
 
 // 计算雅克比矩阵
+// 对重力和尺度方面的导数参考Inertial-Only ptimizatin for Visual-Inertial Initialization的公式6-11
 void EdgeInertialGS::linearizeOplus()
 {
     const VertexPose* VP1 = static_cast<const VertexPose*>(_vertices[0]);
@@ -810,11 +842,19 @@ void EdgeInertialGS::linearizeOplus()
     // Jacobians wrt Gravity direction
     // _jacobianOplus[3] 9*2矩阵 总体来说就是三个残差分别对重力方向求导
     _jacobianOplus[6].setZero();
+    /**
+     * 1. 首先先计算3*3的雅克比矩阵，然后去掉最后一列即可
+     * 2. 对于B = A*P而言，去掉B的最后一列也就是去掉P的最后一列，这也是GM矩阵的由来
+     */
     _jacobianOplus[6].block<3,2>(3,0) = -Rbw1*dGdTheta*dt;
     _jacobianOplus[6].block<3,2>(6,0) = -0.5*Rbw1*dGdTheta*dt*dt;
 
     // Jacobians wrt scale factor
     // _jacobianOplus[3] 9*1矩阵 总体来说就是三个残差分别对尺度求导
+    /**
+     * notes:
+     *      1. 疑似BUG：根据尺度更新的规则，这里的雅克比计算的应该有问题，应该再乘以一个尺度才能跟尺度更新的规则一致
+     */
     _jacobianOplus[7].setZero();
     _jacobianOplus[7].block<3,1>(3,0) = Rbw1*(VV2->estimate()-VV1->estimate());
     _jacobianOplus[7].block<3,1>(6,0) = Rbw1*(VP2->estimate().twb-VP1->estimate().twb-VV1->estimate()*dt);
@@ -845,6 +885,16 @@ void EdgePriorPoseImu::computeError()
     const VertexAccBias* VA = static_cast<const VertexAccBias*>(_vertices[3]);
 
     const Eigen::Vector3d er = LogSO3(Rwb.transpose()*VP->estimate().Rwb);
+    /**
+     * notes:
+     *      1. 在论文Visual-Inertial Monocular SLAM with Map Reuse中实际上没有et这个约束
+     *      2. 这里实际上表达的是基于已知的Rwb，构建两个坐标系T1、T2，他们的旋转均为Rwb，平移分别是VP->estimate().twb、twb
+     *      3. 分别计算世界系的原点在这两个坐标系下的坐标，然后认为二者应该足够接近
+     *      4. 这个约束实在有些不伦不类，如果固定旋转为一个已知的Rwb，这个约束实际上就是e = VP->estimate().twb-twb，也就是IMU中心在世界系下位置的变动
+     *      5. 我们知道当表示为Rbw的时候，IMU中心在世界系的坐标为-Rbw.t * tbw，可以基于IMU中心在世界系的位置来构建残差
+     *      6. 但是这里旋转的表示为Rwb，也就没必要这么做了，不然残差的含义就是某个点在两个坐标系下的坐标应该相同，这不太符合常理，一般应该是两个点在同一个坐标系的坐标应该相同
+     *      7. 仅讨论此处的话，因为使用了一个固定的Rwb，因此运行起来不会有什么问题，但最好还是去掉Rwb，直接使用e = VP->estimate().twb-twb
+     */
     const Eigen::Vector3d et = Rwb.transpose()*(VP->estimate().twb-twb);
     const Eigen::Vector3d ev = VV->estimate() - vwb;
     const Eigen::Vector3d ebg = VG->estimate() - bg;
@@ -865,7 +915,7 @@ void EdgePriorPoseImu::linearizeOplus()
     _jacobianOplus[0].setZero();
     // LOG(Rbw*R*EXP(φ)) = LOG(EXP(LOG(Rbw*R) + Jr(-1)*φ)) = LOG(Rbw*R) + Jr(-1)*φ
     _jacobianOplus[0].block<3,3>(0,0) = InverseRightJacobianSO3(er);   // Jr(-1)
-    // Rbw*(t + R*δt - twb) = Rbw*(t - twb) + Rbw*R*δt
+    // Rbw*(t + R*δt - twb) = Rbw*(t - twb) + Rbw*R*δt，注意平移的更新方式
     _jacobianOplus[0].block<3,3>(3,3) = Rwb.transpose()*VP->estimate().Rwb;  // Rbw*R
     _jacobianOplus[1].setZero();
     _jacobianOplus[1].block<3,3>(6,0) = Eigen::Matrix3d::Identity();
@@ -878,6 +928,7 @@ void EdgePriorPoseImu::linearizeOplus()
 void EdgePriorAcc::linearizeOplus()
 {
     // Jacobian wrt bias
+    // notes: 疑似BUG：雅克比为-I
     _jacobianOplusXi.block<3,3>(0,0) = Eigen::Matrix3d::Identity();
 
 }
@@ -885,6 +936,7 @@ void EdgePriorAcc::linearizeOplus()
 void EdgePriorGyro::linearizeOplus()
 {
     // Jacobian wrt bias
+    // notes: 疑似BUG：雅克比为-I
     _jacobianOplusXi.block<3,3>(0,0) = Eigen::Matrix3d::Identity();
 
 }
@@ -919,6 +971,7 @@ Eigen::Vector3d LogSO3(const Eigen::Matrix3d &R)
     Eigen::Vector3d w;
     w << (R(2,1)-R(1,2))/2, (R(0,2)-R(2,0))/2, (R(1,0)-R(0,1))/2;
     const double costheta = (tr-1.0)*0.5f;
+    // xc's todo: 这里costheta < -1的时候直接取w的理由是什么？
     if(costheta>1 || costheta<-1)
         return w;
     const double theta = acos(costheta);

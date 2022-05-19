@@ -42,6 +42,7 @@ namespace ORB_SLAM3 {
             mnId=nNextId++;
             mnType = CAM_PINHOLE;
         }
+        // 不能在子类里面使用初始化列表的方式初始化基类成员
         Pinhole(const std::vector<float> _vParameters) : GeometricCamera(_vParameters), tvr(nullptr) {
             assert(mvParameters.size() == 4);
             mnId=nNextId++;

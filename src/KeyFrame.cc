@@ -549,6 +549,7 @@ void KeyFrame::UpdateConnections(bool upParent)
         mvOrderedWeights = vector<int>(lWs.begin(), lWs.end());
 
         // Step 5 更新生成树的连接
+        // notes: 从这里可知，一旦执行了此函数后，mbFirstConnection=false；也就是父子关系只在初次调用此函数时建立，之后调用此函数，不改变父子关系，可能其他函数可以改变
         if (mbFirstConnection && mnId != mpMap->GetInitKFid())
         {
             // 初始化该关键帧的父关键帧为共视程度最高的那个关键帧

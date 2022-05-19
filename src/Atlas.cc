@@ -68,6 +68,7 @@ void Atlas::CreateNewMap()
     if (mpCurrentMap)
     {
         // mnLastInitKFidMap为当前地图创建时第1个关键帧的id，它是在上一个地图最大关键帧id的基础上增加1
+        // mspMaps是地图集
         if (!mspMaps.empty() && mnLastInitKFidMap < mpCurrentMap->GetMaxKFid())
             mnLastInitKFidMap = mpCurrentMap->GetMaxKFid() + 1; // The init KF is the next of current maximum
 

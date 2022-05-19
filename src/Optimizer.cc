@@ -292,15 +292,18 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
         g2o::SE3Quat SE3quat = vSE3->estimate();
         if(nLoopKF==pMap->GetOriginKF()->mnId)
         {
+            // 非回环调用
             pKF->SetPose(Sophus::SE3f(SE3quat.rotation().cast<float>(), SE3quat.translation().cast<float>()));
         }
         else
         {
+            // 并不直接写入，而是利用中间变量保存优化后的值
             pKF->mTcwGBA = Sophus::SE3d(SE3quat.rotation(),SE3quat.translation()).cast<float>();
             pKF->mnBAGlobalForKF = nLoopKF;
 
             Sophus::SE3f mTwc = pKF->GetPoseInverse();
             Sophus::SE3f mTcGBA_c = pKF->mTcwGBA * mTwc;
+            // 优化前后平移的大小，起始只有调试的作用
             Eigen::Vector3f vector_dist =  mTcGBA_c.translation();
             double dist = vector_dist.norm();
             if(dist > 1)
@@ -315,6 +318,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                     MapPoint* pMP = vpMapPointEdgeMono[i2];
                     KeyFrame* pKFedge = vpEdgeKFMono[i2];
 
+                    // 找过重投影误差的边对应是这个关键帧的边
                     if(pKF != pKFedge)
                     {
                         continue;
@@ -378,6 +382,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
 
         if(nLoopKF==pMap->GetOriginKF()->mnId)
         {
+            // 非回环调用
             pMP->SetWorldPos(vPoint->estimate().cast<float>());
             pMP->UpdateNormalAndDepth();
         }
@@ -391,6 +396,9 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
 
 void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const long unsigned int nLoopId, bool *pbStopFlag, bool bInit, float priorG, float priorA, Eigen::VectorXd *vSingVal, bool *bHess)
 {
+    /**
+     * bInit: 默认值为false；IMU第二阶段初始化为true；IMU第三阶段初始化为fasle
+     */
     long unsigned int maxKFid = pMap->GetMaxKFid();
     const vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
     const vector<MapPoint*> vpMPs = pMap->GetAllMapPoints();
@@ -404,7 +412,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
     g2o::BlockSolverX * solver_ptr = new g2o::BlockSolverX(linearSolver);
 
     g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
-    solver->setUserLambdaInit(1e-5);
+    solver->setUserLambdaInit(1e-5);  // LM算法lambda阈值
     optimizer.setAlgorithm(solver);
     optimizer.setVerbose(false);
 
@@ -414,7 +422,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
     int nNonFixed = 0;
 
     // Set KeyFrame vertices
-    KeyFrame* pIncKF;
+    KeyFrame* pIncKF;  // 最后一帧
     for(size_t i=0; i<vpKFs.size(); i++)
     {
         KeyFrame* pKFi = vpKFs[i];
@@ -426,6 +434,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         bool bFixed = false;
         if(bFixLocal)
         {
+            // pKFi->mnBALocalForKF>=(maxKFid-1)) || (pKFi->mnBAFixedForKF>=(maxKFid-1)表示这一帧做了localBA
             bFixed = (pKFi->mnBALocalForKF>=(maxKFid-1)) || (pKFi->mnBAFixedForKF>=(maxKFid-1));
             if(!bFixed)
                 nNonFixed++;
@@ -439,7 +448,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
             VV->setId(maxKFid+3*(pKFi->mnId)+1);
             VV->setFixed(bFixed);
             optimizer.addVertex(VV);
-            if (!bInit)
+            if (!bInit)  // IMU第三阶段初始化添加
             {
                 VertexGyroBias* VG = new VertexGyroBias(pKFi);
                 VG->setId(maxKFid+3*(pKFi->mnId)+2);
@@ -453,8 +462,9 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         }
     }
 
-    if (bInit)
+    if (bInit)  // 与上面!bInit添加不同；IMU第二阶段初始化时添加
     {
+        // 这个时候只有只有一个偏置节点
         VertexGyroBias* VG = new VertexGyroBias(pIncKF);
         VG->setId(4*maxKFid+2);
         VG->setFixed(false);
@@ -467,9 +477,16 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
     if(bFixLocal)
     {
+        // 不固定的数量太少，不优化
         if(nNonFixed<3)
             return;
     }
+
+    /**
+     * bInit    VP    VV    VG    VA
+     * false    k    3k+1  3k+2  3k+3
+     * true               4max+2 4max+3
+     */
 
     // IMU links
     for(size_t i=0;i<vpKFs.size();i++)
@@ -496,14 +513,14 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                 g2o::HyperGraph::Vertex* VA1;
                 g2o::HyperGraph::Vertex* VG2;
                 g2o::HyperGraph::Vertex* VA2;
-                if (!bInit)
+                if (!bInit)  // IMU第三阶段初始化
                 {
                     VG1 = optimizer.vertex(maxKFid+3*(pKFi->mPrevKF->mnId)+2);
                     VA1 = optimizer.vertex(maxKFid+3*(pKFi->mPrevKF->mnId)+3);
                     VG2 = optimizer.vertex(maxKFid+3*(pKFi->mnId)+2);
                     VA2 = optimizer.vertex(maxKFid+3*(pKFi->mnId)+3);
                 }
-                else
+                else  // IMU第二阶段初始化，对于不同的关键帧，使用相同的陀螺仪和加速度零偏顶点
                 {
                     VG1 = optimizer.vertex(4*maxKFid+2);
                     VA1 = optimizer.vertex(4*maxKFid+3);
@@ -512,7 +529,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                 g2o::HyperGraph::Vertex* VP2 =  optimizer.vertex(pKFi->mnId);
                 g2o::HyperGraph::Vertex* VV2 = optimizer.vertex(maxKFid+3*(pKFi->mnId)+1);
 
-                if (!bInit)
+                if (!bInit)  // IMU第三阶段初始化
                 {
                     if(!VP1 || !VV1 || !VG1 || !VA1 || !VP2 || !VV2 || !VG2 || !VA2)
                     {
@@ -529,6 +546,8 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                     }
                 }
 
+                // notes: 如果IMU在初始化第二阶段，那么VG1和VA1都是一个顶点；此时也就不会有EdgeGyroRW和EdgeAccRW
+
                 EdgeInertial* ei = new EdgeInertial(pKFi->mpImuPreintegrated);
                 ei->setVertex(0,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VP1));
                 ei->setVertex(1,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VV1));
@@ -543,7 +562,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
                 optimizer.addEdge(ei);
 
-                if (!bInit)
+                if (!bInit)  // IMU第三阶段初始化
                 {
                     EdgeGyroRW* egr= new EdgeGyroRW();
                     egr->setVertex(0,VG1);
@@ -567,7 +586,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         }
     }
 
-    if (bInit)
+    if (bInit)  // IMU第二阶段初始化
     {
         g2o::HyperGraph::Vertex* VG = optimizer.vertex(4*maxKFid+2);
         g2o::HyperGraph::Vertex* VA = optimizer.vertex(4*maxKFid+3);
@@ -576,15 +595,15 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         Eigen::Vector3f bprior;
         bprior.setZero();
 
-        EdgePriorAcc* epa = new EdgePriorAcc(bprior);
+        EdgePriorAcc* epa = new EdgePriorAcc(bprior);  // 一元边，在零向量附近波动
         epa->setVertex(0,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VA));
-        double infoPriorA = priorA; //
+        double infoPriorA = priorA;
         epa->setInformation(infoPriorA*Eigen::Matrix3d::Identity());
         optimizer.addEdge(epa);
 
-        EdgePriorGyro* epg = new EdgePriorGyro(bprior);
+        EdgePriorGyro* epg = new EdgePriorGyro(bprior);  // 一元边，在零向量附近波动
         epg->setVertex(0,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VG));
-        double infoPriorG = priorG; //
+        double infoPriorG = priorG;
         epg->setInformation(infoPriorG*Eigen::Matrix3d::Identity());
         optimizer.addEdge(epg);
     }
@@ -650,6 +669,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
                     optimizer.addEdge(e);
                 }
+                // 在两个相机的模式下，mvuRight中存储的都是-1，因此不会触发这个判断，而是会进行下面的判断，这个时候也就是1个世界点到两个相机的重投影误差（两个二维残差），而不是双目模式下的一个三维残差
                 else if(leftIndex != -1 && pKFi->mvuRight[leftIndex] >= 0) // stereo observation
                 {
                     kpUn = pKFi->mvKeysUn[leftIndex];
@@ -727,7 +747,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
     optimizer.optimize(its);
 
 
-    // Recover optimized data
+    // Recover optimized data：回环调用则通过中间变量保存，否则直接更新
     //Keyframes
     for(size_t i=0; i<vpKFs.size(); i++)
     {
@@ -737,11 +757,13 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         VertexPose* VP = static_cast<VertexPose*>(optimizer.vertex(pKFi->mnId));
         if(nLoopId==0)
         {
+            // 非回环调用
             Sophus::SE3f Tcw(VP->estimate().Rcw[0].cast<float>(), VP->estimate().tcw[0].cast<float>());
             pKFi->SetPose(Tcw);
         }
         else
         {
+            // 并不直接写入，而是通过中间变量保存优化后的结果
             pKFi->mTcwGBA = Sophus::SE3f(VP->estimate().Rcw[0].cast<float>(),VP->estimate().tcw[0].cast<float>());
             pKFi->mnBAGlobalForKF = nLoopId;
 
@@ -785,7 +807,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         }
     }
 
-    //Points
+    //Points  回环调用则通过中间变量保存，否则直接更新
     for(size_t i=0; i<vpMPs.size(); i++)
     {
         if(vbNotIncludedMP[i])
@@ -813,7 +835,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
 int Optimizer::PoseOptimization(Frame *pFrame)
 {
-    g2o::SparseOptimizer optimizer;
+    g2o::SparseOptimizer optimizer;  // 稀疏求解器
     g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
 
     linearSolver = new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
@@ -1006,9 +1028,10 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     for(size_t it=0; it<4; it++)
     {
         Tcw = pFrame->GetPose();
+        // 每次都从原来的值开始优化，避免优化陷入错误方向后，沿着错误方向前进
         vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
 
-        optimizer.initializeOptimization(0);
+        optimizer.initializeOptimization(0);  // 只优化level为0的边
         optimizer.optimize(its[it]);
 
         nBad=0;
@@ -1020,6 +1043,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
             if(pFrame->mvbOutlier[idx])
             {
+                // 重新计算的原因在于，可能之前被设置成level！=0了，因此这条边并没有优化，参数更新后，重新计算
                 e->computeError();
             }
 
@@ -1038,6 +1062,9 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
 
             if(it==2)
+                // 除了前两次优化需要RobustKernel以外，后面的优化不需要了；认为后面的优化比较准了
+                // 实际上，位姿每次都是从同一个初值开始优化的，每次优化的区别在于，level=0的边不同
+                // 后面不需要RobustKernel可能是因为误差大的边都被设为level!=0了
                 e->setRobustKernel(0);
         }
 
@@ -1100,6 +1127,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
         }
 
         if(optimizer.edges().size()<10)
+            // 边的数量太少了，不在优化；这种情况是否应该设为异常
             break;
     }    
 
@@ -1178,7 +1206,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
     }
     num_fixedKF = lFixedCameras.size() + num_fixedKF;
 
-
+    // 没有固定的帧，就会导致局部地图优化的时候可以整体漂移，因此无法优化出结果
     if(num_fixedKF == 0)
     {
         Verbose::PrintMess("LM-LBA: There are 0 fixed KF in the optimizations, LBA aborted", Verbose::VERBOSITY_NORMAL);
@@ -1286,7 +1314,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         vPoint->setEstimate(pMP->GetWorldPos().cast<double>());
         int id = pMP->mnId+maxKFid+1;
         vPoint->setId(id);
-        vPoint->setMarginalized(true);
+        vPoint->setMarginalized(true);  // 加速运算，边缘化点
         optimizer.addVertex(vPoint);
         nPoints++;
 
@@ -1373,6 +1401,11 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
                         cv::KeyPoint kp = pKFi->mvKeysRight[rightIndex];
                         obs << kp.pt.x, kp.pt.y;
 
+                        /**
+                         * notes:
+                         *      1. 实际上利用两个相机之间的外参，将其变换到左相机下，也就是uv = K * Trl * Tlw * Pw，优化的是Tlw，Trl是不变量
+                         *      2. 根据链式求导即可
+                         */
                         ORB_SLAM3::EdgeSE3ProjectXYZToBody *e = new ORB_SLAM3::EdgeSE3ProjectXYZToBody();
 
                         e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
@@ -1407,7 +1440,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         if(*pbStopFlag)
             return;
 
-    optimizer.initializeOptimization();
+    optimizer.initializeOptimization();  // 没有设置level了
     optimizer.optimize(10);
 
     vector<pair<KeyFrame*,MapPoint*> > vToErase;
@@ -1791,6 +1824,7 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
     Verbose::PrintMess("Opt_Essential: There are " + to_string(vpNonCorrectedMPs.size()) + " MPs non-corrected in the merged map", Verbose::VERBOSITY_DEBUG);
 
     g2o::SparseOptimizer optimizer;
+    // 从以下可以得知：初值的尺度全部设置为1
     optimizer.setVerbose(false);
     g2o::BlockSolver_7_3::LinearSolverType * linearSolver =
            new g2o::LinearSolverEigen<g2o::BlockSolver_7_3::PoseMatrixType>();
@@ -1858,7 +1892,7 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
         vCorrectedSwc[nIDi]=Siw.inverse();
         VSim3->setEstimate(Siw);
 
-        Sophus::SE3d Tcw_bef = pKFi->mTcwBefMerge.cast<double>();
+        Sophus::SE3d Tcw_bef = pKFi->mTcwBefMerge.cast<double>();  // 原始的位姿，表示没有矫正和优化前
         vScw[nIDi] = g2o::Sim3(Tcw_bef.unit_quaternion(),Tcw_bef.translation(),1.0);
 
         VSim3->setFixed(true);
@@ -1891,7 +1925,7 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
         Sophus::SE3d Tcw = pKFi->GetPose().cast<double>();
         g2o::Sim3 Siw(Tcw.unit_quaternion(),Tcw.translation(),1.0);
 
-        vScw[nIDi] = Siw;
+        vScw[nIDi] = Siw;  // 注意：这里并不是mTcwBefMerge，而是已经矫正的
         VSim3->setEstimate(Siw);
 
         VSim3->setFixed(false);
@@ -1943,10 +1977,11 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
 
             if(vpGoodPose[nIDi] && vpGoodPose[nIDj])
             {
+                // 这个判断表明两帧都是vpFixedCorrectedKFs或vpFixedKFs，在这种情况下，顶点其实都不优化，bHasRelation最好设置称false
                 Sjw = vCorrectedSwc[nIDj].inverse();
                 bHasRelation = true;
             }
-            else if(vpBadPose[nIDi] && vpBadPose[nIDj])
+            else if(vpBadPose[nIDi] && vpBadPose[nIDj])  // 这个判断表明两帧来自vpFixedCorrectedKFs或vpNonFixedKFs
             {
                 Sjw = vScw[nIDj];
                 bHasRelation = true;
@@ -1973,7 +2008,7 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
         for(set<KeyFrame*>::const_iterator sit=sLoopEdges.begin(), send=sLoopEdges.end(); sit!=send; sit++)
         {
             KeyFrame* pLKF = *sit;
-            if(spKFs.find(pLKF) != spKFs.end() && pLKF->mnId<pKFi->mnId)
+            if(spKFs.find(pLKF) != spKFs.end() && pLKF->mnId<pKFi->mnId)  // 注意这个<的含义，前面添加AddLoopEdge导致的
             {
                 g2o::Sim3 Slw;
                 bool bHasRelation = false;
@@ -2189,7 +2224,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
                 P3D1c = R1w*P3D1w + t1w;
                 vPoint1->setEstimate(P3D1c.cast<double>());
                 vPoint1->setId(id1);
-                vPoint1->setFixed(true);
+                vPoint1->setFixed(true);  // 优化的是相似变换，而不是地图点
                 optimizer.addVertex(vPoint1);
 
                 g2o::VertexSBAPointXYZ* vPoint2 = new g2o::VertexSBAPointXYZ();
@@ -2211,6 +2246,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
             nMatchWithoutMP++;
 
             //TODO The 3D position in KF1 doesn't exist
+            // KF1中只有这个特征点，没有对应的地图点；有可能是投影匹配时构建的2D-3D匹配，并不要求两个地图点都存在
             if(!pMP2->isBad())
             {
                 g2o::VertexSBAPointXYZ* vPoint2 = new g2o::VertexSBAPointXYZ();
@@ -2249,7 +2285,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
 
         e12->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id2)));
         e12->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
-        e12->setMeasurement(obs1);
+        e12->setMeasurement(obs1);  // 使用的是重投影误差
         const float &invSigmaSquare1 = pKF1->mvInvLevelSigma2[kpUn1.octave];
         e12->setInformation(Eigen::Matrix2d::Identity()*invSigmaSquare1);
 
@@ -2272,10 +2308,12 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
         }
         else
         {
+            // 找不到对应的特征点，就是用P3D2c的投影来构建一个特征点
             float invz = 1/P3D2c(2);
             float x = P3D2c(0)*invz;
             float y = P3D2c(1)*invz;
 
+            // xc's todo: 这个obs2是归一化坐标，不是图片坐标，这个误差计算有问题
             obs2 << x, y;
             kpUn2 = cv::KeyPoint(cv::Point2f(x, y), pMP2->mnTrackScaleLevel);
 
@@ -2321,6 +2359,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
         {
             size_t idx = vnIndexEdge[i];
             vpMatches1[idx]=static_cast<MapPoint*>(NULL);
+            // 之后优化就不优化外点了
             optimizer.removeEdge(e12);
             optimizer.removeEdge(e21);
             vpEdges12[i]=static_cast<ORB_SLAM3::EdgeSim3ProjectXYZ*>(NULL);
@@ -2335,7 +2374,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
         }
 
         //Check if remove the robust adjustment improve the result
-        e12->setRobustKernel(0);
+        e12->setRobustKernel(0);  // 后面会再次优化，那时候就不使用Robust kernel
         e21->setRobustKernel(0);
     }
 
@@ -2382,6 +2421,12 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
 
 void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int& num_fixedKF, int& num_OptKF, int& num_MPs, int& num_edges, bool bLarge, bool bRecInit)
 {
+    /**
+     * notes:
+     *      1. 这里既要或许序列的关键帧用于IMU约束，也会获取共视图的共视关键帧用于构建局部地图，当然序列关键帧的地图点也在局部地图中
+     *      2. bRecInit = !mpCurrentKeyFrame->GetMap()->GetIniertialBA2()
+     */
+
     Map* pCurrentMap = pKF->GetMap();
 
     int maxOpt=10;
@@ -2512,7 +2557,9 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 
     if(bLarge)
     {
+        // 跟踪的比较好的情况
         g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+        // LM算法的lambda值
         solver->setUserLambdaInit(1e-2); // to avoid iterating for finding optimal lambda
         optimizer.setAlgorithm(solver);
     }
@@ -2629,6 +2676,12 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
             vei[i]->setVertex(4,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VP2));
             vei[i]->setVertex(5,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VV2));
 
+            /**
+             * notes：最早的可优化的关键帧或者地图没有IMU的第二阶段初始化时
+             *      1. 地图没有IMU的第二阶段初始化时，惯性误差可能比较大，因此使用Robust Kernel
+             *      2. 如果是最早的可优化的关键帧，那么其前一关键帧就是固定的，这可能这一关键帧与其前一关键帧的惯性变导致较大的误差，
+             *         因此将其information matrix降低，这表示容许他与他前一个关键帧的惯性边出现较大误差
+             */
             if(i==N-1 || bRecInit)
             {
                 // All inertial residuals are included without robust cost function, but not that one linking the
@@ -2694,7 +2747,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 
     const unsigned long iniMPid = maxKFid*5;
 
-    map<int,int> mVisEdges;
+    map<int,int> mVisEdges;  // 并不包括视觉关键帧
     for(int i=0;i<N;i++)
     {
         KeyFrame* pKFi = vpOptimizableKFs[i];
@@ -2705,6 +2758,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
         mVisEdges[(*lit)->mnId] = 0;
     }
 
+    // lLocalMapPoints来自视觉关键帧和IMU关键帧
     for(list<MapPoint*>::iterator lit=lLocalMapPoints.begin(), lend=lLocalMapPoints.end(); lit!=lend; lit++)
     {
         MapPoint* pMP = *lit;
@@ -2835,12 +2889,13 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     // TODO debug会报错先注释掉
     for(map<int,int>::iterator mit=mVisEdges.begin(), mend=mVisEdges.end(); mit!=mend; mit++)
     {
+        // 确保每一个每一个关键帧至少有三个局部地图点
         assert(mit->second>=3);
     }
 
     optimizer.initializeOptimization();
     optimizer.computeActiveErrors();
-    float err = optimizer.activeRobustChi2();
+    float err = optimizer.activeRobustChi2();  // 所有边的累计误差
     optimizer.optimize(opt_it); // Originally to 2
     float err_end = optimizer.activeRobustChi2();
     if(pbStopFlag)
@@ -2889,6 +2944,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 
 
     // TODO: Some convergence problems have been detected here
+    // 判断优化有没有收敛
     if((2*err < err_end || isnan(err) || isnan(err_end)) && !bLarge) //bGN)
     {
         cout << "FAIL LOCAL-INERTIAL BA!!!!" << endl;
@@ -2958,7 +3014,8 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     pMap->IncreaseChangeIndex();
 }
 
-Eigen::MatrixXd Optimizer::Marginalize(const Eigen::MatrixXd &H, const int &start, const int &end)
+// 包含start和end
+Eigen::MatrixXd Optimizer:: Marginalize(const Eigen::MatrixXd &H, const int &start, const int &end)
 {
     // Goal
     // a  | ab | ac       a*  | 0 | ac*
@@ -2966,11 +3023,22 @@ Eigen::MatrixXd Optimizer::Marginalize(const Eigen::MatrixXd &H, const int &star
     // ca | cb | c        ca* | 0 | c*
 
     // Size of block before block to marginalize
-    const int a = start;
+    const int a = start;  // 不包含start
     // Size of block to marginalize
-    const int b = end-start+1;
+    const int b = end-start+1;  // 包含start和end
     // Size of block after block to marginalize
-    const int c = H.cols() - (end+1);
+    const int c = H.cols() - (end+1);  // 不包含end
+
+    /**
+     * notes:
+     *      1.请牢记这里是迭代求解方程Hx = b；这里的操作可以看成是对矩阵H的行变换和列变化
+     *      2. 行变换不会改变方程的解，只需要将对应的bi调换位置即可
+     *      3. 列变换实际上会对求解向量x的顺序产生影响，因此在res求解中才会将其顺序恢复
+     *      4. 由于此处我们想要的是边缘化某些变量，因此实际上也不需要恢复了
+     *      5. 例如下面我们会边缘化ab部分对应的变量，尽管ab与ac对应的变量的顺序变了，但是最后我们并不需要ab对应的变量了，而a与ac对应变量的顺序并没有改变
+     *      6. 这也是为什么后面的res的求解其实没有必要的原因了
+     *      7. 当然如果并不仅仅是为了边缘化，那么还是需要将其顺序恢复的
+     */
 
     // Reorder as follows:
     // a  | ab | ac       a  | ac | ab
@@ -2980,24 +3048,29 @@ Eigen::MatrixXd Optimizer::Marginalize(const Eigen::MatrixXd &H, const int &star
     Eigen::MatrixXd Hn = Eigen::MatrixXd::Zero(H.rows(),H.cols());
     if(a>0)
     {
-        Hn.block(0,0,a,a) = H.block(0,0,a,a);
-        Hn.block(0,a+c,a,b) = H.block(0,a,a,b);
-        Hn.block(a+c,0,b,a) = H.block(a,0,b,a);
+        Hn.block(0,0,a,a) = H.block(0,0,a,a);  // a的位置不动
+        Hn.block(0,a+c,a,b) = H.block(0,a,a,b);  // 移动ab
+        Hn.block(a+c,0,b,a) = H.block(a,0,b,a);  // 移动ba
     }
     if(a>0 && c>0)
     {
-        Hn.block(0,a,a,c) = H.block(0,a+b,a,c);
-        Hn.block(a,0,c,a) = H.block(a+b,0,c,a);
+        Hn.block(0,a,a,c) = H.block(0,a+b,a,c);  // 移动ac
+        Hn.block(a,0,c,a) = H.block(a+b,0,c,a);  // 移动ca
     }
     if(c>0)
     {
-        Hn.block(a,a,c,c) = H.block(a+b,a+b,c,c);
-        Hn.block(a,a+c,c,b) = H.block(a+b,a,c,b);
-        Hn.block(a+c,a,b,c) = H.block(a,a+b,b,c);
+        Hn.block(a,a,c,c) = H.block(a+b,a+b,c,c);  // 移动c
+        Hn.block(a,a+c,c,b) = H.block(a+b,a,c,b);  // 移动bc
+        Hn.block(a+c,a,b,c) = H.block(a,a+b,b,c);  // 移动cb
     }
-    Hn.block(a+c,a+c,b,b) = H.block(a,a,b,b);
+    Hn.block(a+c,a+c,b,b) = H.block(a,a,b,b);  // 移动b
 
     // Perform marginalization (Schur complement)
+    /**
+     * notes：
+     *      1. 下面的操作是为了避免b奇异所做的操作，目标是求解b的逆矩阵
+     *      2. 当然在本代码的其他地方使用了特征值分解，二者都是可行的，因为b是对称矩阵
+     */
     Eigen::JacobiSVD<Eigen::MatrixXd> svd(Hn.block(a+c,a+c,b,b),Eigen::ComputeThinU | Eigen::ComputeThinV);
     Eigen::JacobiSVD<Eigen::MatrixXd>::SingularValuesType singularValues_inv=svd.singularValues();
     for (int i=0; i<b; ++i)
@@ -3011,6 +3084,13 @@ Eigen::MatrixXd Optimizer::Marginalize(const Eigen::MatrixXd &H, const int &star
     Hn.block(a+c,a+c,b,b) = Eigen::MatrixXd::Zero(b,b);
     Hn.block(0,a+c,a+c,b) = Eigen::MatrixXd::Zero(a+c,b);
     Hn.block(a+c,0,b,a+c) = Eigen::MatrixXd::Zero(b,a+c);
+
+    /**
+     * notes:
+     *      1. 实际上，下面的操作没必要做，因为，我们不会需要已经被边缘化的变量对应的Hessian matrix了
+     *      2. 当前这样做更具有普遍性，可以实现其他的需求
+     *      3. 如果最后我们需要的维度的变量不是连续的（在这里我们最后需要的是最后连续的15维），那么我们仍然拼凑出所需的Hessian matrix，还不如直接在Hn上面block截取，而不是在res上拼凑
+     */
 
     // Inverse reorder
     // a*  | ac* | 0       a*  | 0 | ac*
@@ -3040,8 +3120,12 @@ Eigen::MatrixXd Optimizer::Marginalize(const Eigen::MatrixXd &H, const int &star
     return res;
 }
 
+// IMU初始化阶段调用
 void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &scale, Eigen::Vector3d &bg, Eigen::Vector3d &ba, bool bMono, Eigen::MatrixXd  &covInertial, bool bFixedVel, bool bGauss, float priorG, float priorA)
 {
+    /**
+     * bFixedVel:false
+     */
     Verbose::PrintMess("inertial optimization", Verbose::VERBOSITY_NORMAL);
     int its = 200;
     long unsigned int maxKFid = pMap->GetMaxKFid();
@@ -3070,7 +3154,7 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
             continue;
         VertexPose * VP = new VertexPose(pKFi);
         VP->setId(pKFi->mnId);
-        VP->setFixed(true);
+        VP->setFixed(true);  // 不优化位姿
         optimizer.addVertex(VP);
 
         VertexVelocity* VV = new VertexVelocity(pKFi);
@@ -3084,7 +3168,8 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
     }
 
     // Biases
-    VertexGyroBias* VG = new VertexGyroBias(vpKFs.front());
+    // 只有一个零偏顶点，这个函数用于IMU初始化，因此只优化一个零偏即可
+    VertexGyroBias* VG = new VertexGyroBias(vpKFs.front());  // 起始第一帧
     VG->setId(maxKFid*2+2);
     if (bFixedVel)
         VG->setFixed(true);
@@ -3103,12 +3188,12 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
     Eigen::Vector3f bprior;
     bprior.setZero();
 
-    EdgePriorAcc* epa = new EdgePriorAcc(bprior);
+    EdgePriorAcc* epa = new EdgePriorAcc(bprior);  // 约束在零向量附近
     epa->setVertex(0,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VA));
     double infoPriorA = priorA;
     epa->setInformation(infoPriorA*Eigen::Matrix3d::Identity());
     optimizer.addEdge(epa);
-    EdgePriorGyro* epg = new EdgePriorGyro(bprior);
+    EdgePriorGyro* epg = new EdgePriorGyro(bprior);  // 约束在零向量附近
     epg->setVertex(0,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VG));
     double infoPriorG = priorG;
     epg->setInformation(infoPriorG*Eigen::Matrix3d::Identity());
@@ -3215,7 +3300,7 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
         {
             pKFi->SetNewBias(b);
             if (pKFi->mpImuPreintegrated)
-                pKFi->mpImuPreintegrated->Reintegrate();
+                pKFi->mpImuPreintegrated->Reintegrate();  // 优化后变动明显就重新预积分，注意这里只是在初始化阶段执行，因此不会导致极大的计算量
         }
         else
             pKFi->SetNewBias(b);
@@ -3224,7 +3309,7 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
     }
 }
 
-
+// 地图合并阶段调用: IMU模式，还没有经过第二阶段初始化，地图还不成熟
 void Optimizer::InertialOptimization(Map *pMap, Eigen::Vector3d &bg, Eigen::Vector3d &ba, float priorG, float priorA)
 {
     int its = 200; // Check number of iterations
@@ -3252,17 +3337,18 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Vector3d &bg, Eigen::Vect
             continue;
         VertexPose * VP = new VertexPose(pKFi);
         VP->setId(pKFi->mnId);
-        VP->setFixed(true);
+        VP->setFixed(true);  // 固定位姿
         optimizer.addVertex(VP);
 
         VertexVelocity* VV = new VertexVelocity(pKFi);
         VV->setId(maxKFid+(pKFi->mnId)+1);
-        VV->setFixed(false);
+        VV->setFixed(false);  // 优化速度
 
         optimizer.addVertex(VV);
     }
 
     // Biases
+    // 注意这里只创建了一个零偏的顶点，使用的是起始第一帧
     VertexGyroBias* VG = new VertexGyroBias(vpKFs.front());
     VG->setId(maxKFid*2+2);
     VG->setFixed(false);
@@ -3289,6 +3375,7 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Vector3d &bg, Eigen::Vect
     optimizer.addEdge(epg);
 
     // Gravity and scale
+    // 这里使用了这两个顶点又固定，为什么不直接使用惯性边：是为了在给定的重力和尺度下执行惯性优化，如果直接使用惯性边，没办法传入指定的重力和尺度
     VertexGDir* VGDir = new VertexGDir(Eigen::Matrix3d::Identity());
     VGDir->setId(maxKFid*2+4);
     VGDir->setFixed(true);
@@ -3380,13 +3467,14 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Vector3d &bg, Eigen::Vect
         {
             pKFi->SetNewBias(b);
             if (pKFi->mpImuPreintegrated)
-                pKFi->mpImuPreintegrated->Reintegrate();
+                pKFi->mpImuPreintegrated->Reintegrate();  // 优化前后变动幅度较大，就重新预积分
         }
         else
             pKFi->SetNewBias(b);
     }
 }
 
+// 尺度refine阶段调用
 void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &scale)
 {
     int its = 10;
@@ -3434,7 +3522,7 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
     // Gravity and scale
     VertexGDir* VGDir = new VertexGDir(Rwg);
     VGDir->setId(4*(maxKFid+1));
-    VGDir->setFixed(false);
+    VGDir->setFixed(false);  // 优化重力
     optimizer.addVertex(VGDir);
     VertexScale* VS = new VertexScale(scale);
     VS->setId(4*(maxKFid+1)+1);
@@ -4032,6 +4120,7 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
         else
             break;
     }
+    // vpOptimizableKFs保存了当前关键帧以及其前5帧，pMergeKF以及其前后各3帧
 
     int N = vpOptimizableKFs.size();
 
@@ -4059,7 +4148,7 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
         }
     }
 
-    std::vector<std::pair<MapPoint*, int>> pairs;
+    std::vector<std::pair<MapPoint*, int>> pairs;  // 作用是根据排序获取maxCovKF个最好的地图点，进而获取其观测的关键帧
     pairs.reserve(mLocalObs.size());
     for (auto itr = mLocalObs.begin(); itr != mLocalObs.end(); ++itr)
         pairs.push_back(*itr);
@@ -4157,6 +4246,7 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
         }
     }
 
+    // 从前面的逻辑看，lFixedKeyFrames里面只有一帧
     // Set Fixed KeyFrame vertices
     for(list<KeyFrame*>::iterator lit=lFixedKeyFrames.begin(), lend=lFixedKeyFrames.end(); lit!=lend; lit++)
     {
@@ -4799,6 +4889,7 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
     if ((nInliers<30) && !bRecInit)
     {
         nBad=0;
+        // 提高外点阈值
         const float chi2MonoOut = 18.f;
         const float chi2StereoOut = 24.f;
         EdgeMonoOnlyPose* e1;
@@ -4835,7 +4926,8 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
     Eigen::Matrix<double,15,15> H;
     H.setZero();
 
-    H.block<9,9>(0,0)+= ei->GetHessian2();
+    // imu的约束产生
+    H.block<9,9>(0,0)+= ei->GetHessian2();  // 只保留当前帧的，因此零偏的信息没有保存，因为IMU约束里面的零偏信息是关键帧的
     H.block<3,3>(9,9) += egr->GetHessian2();
     H.block<3,3>(12,12) += ear->GetHessian2();
 
@@ -4848,6 +4940,7 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
 
         if(!pFrame->mvbOutlier[idx])
         {
+            // 添加重投影的约束
             H.block<6,6>(0,0) += e->GetHessian();
             tot_in++;
         }
@@ -5040,6 +5133,13 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
 
     nInitialCorrespondences = nInitialMonoCorrespondences + nInitialStereoCorrespondences;
 
+    /**
+     * notes:
+     *      1. 注意这里会优化上一帧的IMU对应的相关顶点，与PoseInertialOptimizationLastKeyFrame不一样
+     *      2. 在PoseInertialOptimizationLastKeyFrame中H的计算很简单，比这里要容易很多，是因为：
+     *          2.1 PoseInertialOptimizationLastKeyFrame中的滑窗只有一帧，也就是当前帧，LastKF的各变量都是固定不优化的，因此不算在滑窗里面，也就不用边缘化
+     *          2.2 在这里，实际上优化的是一个含有两帧的滑窗，因此需要做边缘化的处理
+     */
     // Set Previous Frame Vertex
     Frame* pFp = pFrame->mpPrevFrame;
 
@@ -5089,6 +5189,12 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
 
     EdgePriorPoseImu* ep = new EdgePriorPoseImu(pFp->mpcpi);
 
+    /**
+     * notes:
+     *      1. 这里的意思是两个连续普通帧联合优化的时候，对前一帧的优化应该使得相关状态量在其pFp->mpcpi附近，而pFp->mpcpi是之前优化的结果
+     *      2. 也就是这里的优化主要是优化当前帧，对前一帧的优化应该限制其波动的范围
+     *      3. 如果地图发生变动的话就没有这个边的限制了，也就是PoseInertialOptimizationLastKeyFrame中没有这条边
+     */
     ep->setVertex(0,VPk);
     ep->setVertex(1,VVk);
     ep->setVertex(2,VGk);
@@ -5235,6 +5341,15 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
     pFrame->mImuBias = IMU::Bias(b[3],b[4],b[5],b[0],b[1],b[2]);
 
     // Recover Hessian, marginalize previous frame states and generate new prior for frame
+    /**
+     * notes:
+     *      1. 这里的H实际上按照顺序对应着Ti, Vi, bi_g, bi_a, Tj, Vj, bj_g, bj_a，共30维
+     *      2. ei按照顺序对应着Ti, Vi, bi_g, bi_a, Tj, Vj
+     *      3. egr按照顺序对应着bi_g, bj_g
+     *      4. ear按照顺序对应着bi_a, bj_a
+     *      5. ep按照顺序对应着Ti, Vi, bi_g, bi_a
+     *      6. 按照上面的顺序对应填入数字即可
+     */
     Eigen::Matrix<double,30,30> H;
     H.setZero();
 
@@ -5285,6 +5400,7 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
             tot_out++;
     }
 
+    // notes: 将上一帧的约束添加到当前帧中，利用边缘化实现
     H = Marginalize(H,0,14);
 
     pFrame->mpcpi = new ConstraintPoseImu(VP->estimate().Rwb,VP->estimate().twb,VV->estimate(),VG->estimate(),VA->estimate(),H.block<15,15>(15,15));

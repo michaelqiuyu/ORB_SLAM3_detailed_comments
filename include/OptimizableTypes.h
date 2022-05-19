@@ -56,6 +56,7 @@ public:
     GeometricCamera* pCamera;
 };
 
+// uv = π(Trl * Tlw * Pw)，优化Tlw
 class  EdgeSE3ProjectXYZOnlyPoseToBody: public  g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3Expmap>{
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -188,6 +189,14 @@ public:
         Eigen::Vector2d obs(_measurement);
         _error = obs-v1->pCamera1->project(v1->estimate().map(v2->estimate()));
     }
+
+    /**
+     * notes:
+     *      1. 此处并没有实现雅克比求导，使用的是继承的linearizeOplus函数，见g2o/g2o/core/base_binary_edge.hpp
+     *      2. 对一个k维变量的每一维，使用的是f' = [(f(x + delta) - f(x)) - (f(x - delta) - f(x)] / (2 * delta)的方式求导，保持其他维的值不变
+     *      3. 对维度进行遍历，也就得到了导数
+     *      4. 这种数值求导不一定精确，但是可以省略求导时间，在快速开发的时候可以借鉴
+     */
 
     // virtual void linearizeOplus();
 

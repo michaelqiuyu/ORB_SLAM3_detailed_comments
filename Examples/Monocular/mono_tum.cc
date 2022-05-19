@@ -20,6 +20,7 @@
 #include<algorithm>
 #include<fstream>
 #include<chrono>
+#include<sophus/so3.hpp>
 
 #include<opencv2/core/core.hpp>
 

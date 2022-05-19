@@ -63,16 +63,21 @@ namespace ORB_SLAM3 {
         virtual Eigen::Vector2f project(const Eigen::Vector3f & v3D) = 0;
         virtual Eigen::Vector2f projectMat(const cv::Point3f& p3D) = 0;
 
+        // 返回像素点的不确定性，返回的都是1.0f
         virtual float uncertainty2(const Eigen::Matrix<double,2,1> &p2D) = 0;
 
+        // 反投影，归一化平面坐标
         virtual Eigen::Vector3f unprojectEig(const cv::Point2f &p2D) = 0;
         virtual cv::Point3f unproject(const cv::Point2f &p2D) = 0;
 
+        // (u, v)对相机系坐标(x, y, z)的雅克比
         virtual Eigen::Matrix<double,2,3> projectJac(const Eigen::Vector3d& v3D) = 0;
 
+        // 三角化恢复三维点
         virtual bool ReconstructWithTwoViews(const std::vector<cv::KeyPoint>& vKeys1, const std::vector<cv::KeyPoint>& vKeys2, const std::vector<int> &vMatches12,
                                              Sophus::SE3f &T21, std::vector<cv::Point3f> &vP3D, std::vector<bool> &vbTriangulated) = 0;
 
+        // 返回K矩阵
         virtual cv::Mat toK() = 0;
         virtual Eigen::Matrix3f toK_() = 0;
 

@@ -626,6 +626,18 @@ namespace ORB_SLAM3
         const float &cx = pKF->cx;
         const float &cy = pKF->cy;
 
+        // xc's todo: 疑似BUG，这里的地图点并没有经过矫正，还是应该使用相似变换，而非T变换
+        // Pw' = Tcw.inv * Scw * Pw，其中Tcw表示Scw去除尺度后的变换矩阵，也就是R，t/s，这里变换的核心是使得两个坐标系没有尺度的问题
+        // 也就是形如y = Rx + t，从y = sRx + t→y/s = Rx + t/s，对y坐标尺度缩小到与x保持一致
+        /**
+         * notes:
+         *      1. 这里的Tcw是不含尺度的正确的位姿；因此这里的Ow也是不含尺度的正确的位姿
+         *      2. 后面根据Tcw计算的p3Dc也是不含尺度的，正常来说，在位姿还没有矫正之前，是不能使用不含尺度的p3Dc的，
+         *         但是有尺度的p3Dc与不含尺度的p3Dc仅仅只是差了一个尺度s，其归一化相机系的坐标是完全相同的，也就是说
+         *         像素坐标是完全不受影响的
+         *      3. dist的计算正好基于两个都不含尺度的s计算得到，因此其也是没有尺度的，因此才能够使用maxDistance和minDistance加以判断
+         *      4. 当然此处的写法非常容易迷惑人，不建议这样写，可读性太差
+         */
         Sophus::SE3f Tcw = Sophus::SE3f(Scw.rotationMatrix(),Scw.translation()/Scw.scale());
         Eigen::Vector3f Ow = Tcw.inverse().translation();
 
@@ -649,6 +661,10 @@ namespace ORB_SLAM3
             Eigen::Vector3f p3Dw = pMP->GetWorldPos();
 
             // Transform into Camera Coords.
+            /**
+             * notes:
+             *      1.
+             */
             Eigen::Vector3f p3Dc = Tcw * p3Dw;
 
             // Depth must be positive
@@ -660,6 +676,7 @@ namespace ORB_SLAM3
             const float x = p3Dc(0)*invz;
             const float y = p3Dc(1)*invz;
 
+            // 此处是否有问题，因为不一定是去畸变后的针孔相机，还有可能是没有去畸变的鱼眼相机
             const float u = fx*x+cx;
             const float v = fy*y+cy;
 
@@ -679,6 +696,7 @@ namespace ORB_SLAM3
             // Viewing angle must be less than 60 deg
             Eigen::Vector3f Pn = pMP->GetNormal();
 
+            // 余弦值小于0.5，也就是60度
             if(PO.dot(Pn)<0.5*dist)
                 continue;
 
@@ -895,11 +913,13 @@ namespace ORB_SLAM3
         const vector<cv::KeyPoint> &vKeysUn1 = pKF1->mvKeysUn;
         const DBoW2::FeatureVector &vFeatVec1 = pKF1->mFeatVec;
         const vector<MapPoint*> vpMapPoints1 = pKF1->GetMapPointMatches();
+        // 如果是双目的话，仅仅使用了左相机的描述子
         const cv::Mat &Descriptors1 = pKF1->mDescriptors;
 
         const vector<cv::KeyPoint> &vKeysUn2 = pKF2->mvKeysUn;
         const DBoW2::FeatureVector &vFeatVec2 = pKF2->mFeatVec;
         const vector<MapPoint*> vpMapPoints2 = pKF2->GetMapPointMatches();
+        // 如果是双目的话，仅仅使用了左相机的描述子
         const cv::Mat &Descriptors2 = pKF2->mDescriptors;
 
         // 保存匹配结果
@@ -952,6 +972,7 @@ namespace ORB_SLAM3
                     {
                         const size_t idx2 = f2it->second[i2];
 
+                        // 如果是双目的话，检索到了右相机的特征点就直接跳过
                         if(pKF2 -> NLeft != -1 && idx2 >= pKF2 -> mvKeysUn.size()){
                             continue;
                         }
@@ -1553,6 +1574,11 @@ namespace ORB_SLAM3
 
         // Decompose Scw
         // Step 1 将Sim3转化为SE3并分解
+        /**
+         * notes:
+         *      1. 这里分离尺度并不是为了矫正位姿，而是为了使得dist3D没有尺度
+         *      2. 由于是中心投影，加不加尺度，投影的相机系的归一化坐标都一样，因此投影也一样
+         */
         Sophus::SE3f Tcw = Sophus::SE3f(Scw.rotationMatrix(),Scw.translation()/Scw.scale());
         Eigen::Vector3f Ow = Tcw.inverse().translation();
 
@@ -2001,6 +2027,7 @@ namespace ORB_SLAM3
                     if(uv(1)<CurrentFrame.mnMinY || uv(1)>CurrentFrame.mnMaxY)
                         continue;
                     // 认为投影前后地图点的尺度信息不变
+                    // 也会搜索右相机上的匹配
                     int nLastOctave = (LastFrame.Nleft == -1 || i < LastFrame.Nleft) ? LastFrame.mvKeys[i].octave
                                                                                     : LastFrame.mvKeysRight[i - LastFrame.Nleft].octave;
 
@@ -2063,6 +2090,12 @@ namespace ORB_SLAM3
                     // 最佳匹配距离要小于设定阈值
                     if(bestDist<=TH_HIGH)
                     {
+                        /**
+                         * notes: 按照当前的代码逻辑，至于在定位模式下再会运行到这里
+                         *      1. 注意这里并没有给pMP添加观测信息，实际上CurrentFrame也不是关键帧
+                         *      2. 如果pMP是双目生成的临时地图点，那么一旦判定CurrentFrame是关键帧，那么就会利用观测清除掉这种地图点，然后重新生成地图点
+                         *      3. 虽然后面使用了临时地图点的容器想要利用它删除双目生成的临时地图点，但是好像变成了野指针，不一定删掉了；如果确实删掉了的话，后面也没必要做判断了
+                         */
                         CurrentFrame.mvpMapPoints[bestIdx2]=pMP;
                         nmatches++;
 

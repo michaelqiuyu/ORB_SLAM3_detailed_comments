@@ -344,7 +344,7 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
 }
 
 // 单目模式
-Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF, const IMU::Calib &ImuCalib)
+Frame:: Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF, const IMU::Calib &ImuCalib)
     :mpcpi(NULL),mpORBvocabulary(voc),mpORBextractorLeft(extractor),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
      mTimeStamp(timeStamp), mK(static_cast<Pinhole*>(pCamera)->toK()), mK_(static_cast<Pinhole*>(pCamera)->toK_()), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
      mImuCalib(ImuCalib), mpImuPreintegrated(NULL),mpPrevFrame(pPrevF),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mpCamera(pCamera),
@@ -987,6 +987,7 @@ void Frame::ComputeBoW()
     if(mBowVec.empty())
     {
         // 将描述子mDescriptors转换为DBOW要求的输入格式
+        // notes: 这里仅仅使用了左相机的描述子，而没有使用右相机
         vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptors);
         // 将特征点的描述子转换成词袋向量mBowVec以及特征向量mFeatVec
         mpORBvocabulary->transform(vCurrentDesc,    //当前的描述子vector
@@ -998,7 +999,9 @@ void Frame::ComputeBoW()
 
 /**
  * @brief 用内参对特征点去畸变，结果报存在mvKeysUn中
- * 
+ *
+ * notes:
+ *      只有针孔模型进行了去畸变
  */
 void Frame::UndistortKeyPoints()
 {
@@ -1029,6 +1032,7 @@ void Frame::UndistortKeyPoints()
     // 为了能够直接调用opencv的函数来去畸变，需要先将矩阵调整为2通道（对应坐标x,y）
     // cv::undistortPoints最后一个矩阵为空矩阵时，得到的点为归一化坐标点
     mat=mat.reshape(2);
+    // notes: 读取相机参数的时候，只有在针孔模型的时候才将畸变参数存储到了mDistCoef中，鱼眼模型下没有存储mDistCoef
     cv::undistortPoints(mat,mat, static_cast<Pinhole*>(mpCamera)->toK(),mDistCoef,cv::Mat(),mK);
     // 调整回只有一个通道，回归我们正常的处理方式
     mat=mat.reshape(1);

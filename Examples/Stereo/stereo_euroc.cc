@@ -105,6 +105,8 @@ int main(int argc, char **argv)
             // Read left and right images from file
             imLeft = cv::imread(vstrImageLeft[seq][ni],cv::IMREAD_UNCHANGED); //,cv::IMREAD_UNCHANGED);
             imRight = cv::imread(vstrImageRight[seq][ni],cv::IMREAD_UNCHANGED); //,cv::IMREAD_UNCHANGED);
+            cv::imshow("left", imLeft);
+            cv::imshow("right", imRight);
 
             if(imLeft.empty())
             {

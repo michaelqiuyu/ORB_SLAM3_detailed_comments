@@ -291,6 +291,12 @@ void Map::ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool b
          * | s*Rw2w1  tw2w1 |   *   | Rw1c    tw1c  |     =    |  s*Rw2c     s*Rw2w1*tw1c + tw2w1  |
          * |   0        1   |       |  0       1    |          |     0                1            |
          */
+
+        /**
+         * notes: 上面的注释解释的有问题，可以忽略
+         *      1. 从速度计算那里得到的是一个尺度模糊的速度，尺度模糊的原因是相机与IMU的外参tcb是有尺度的，twc是没有尺度的
+         *      2. 尺度s直接乘以平移恢复了平移的尺度了
+         */
         KeyFrame *pKF = *sit;
         Sophus::SE3f Twc = pKF->GetPoseInverse();
         Twc.translation() *= s;
@@ -301,6 +307,14 @@ void Map::ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool b
         Sophus::SE3f Tcy = Tyc.inverse();
         pKF->SetPose(Tcy);
         // 更新关键帧速度
+        /**
+         * todo: 疑似BUG，速度尺度恢复有问题
+         * notes:
+         *      1. 速度由mOwb2 - mOwb1 = Rwc2 * tcb - Rwc1 * tcb + twc2 - twc1获得，但是tcb有尺度，twc没有尺度
+         *      2. 因此这里不是简单在Vw上乘以一个s就行了，而应该按照mOwb2 - mOwb1 = Rwc2 * tcb - Rwc1 * tcb + s * twc2 - s * twc1来进行重新计算
+         *      3. 如果按照下面的方式进行计算，实际的结果为mOwb2 - mOwb1 = s * (Rwc2 * tcb - Rwc1 * tcb + twc2 - twc1)，也就是将有尺度的tcb也进行了缩放，这是不对的
+         *      4. 代码之所以能运行的原因，我猜想是因为Rwc1与Rwc2非常接近，也就是连续的两个关键帧的位姿基本相同，所以才没有多大的误差产生
+         */
         Eigen::Vector3f Vw = pKF->GetVelocity();
         if (!bScaledVel)
             pKF->SetVelocity(Ryw * Vw);
@@ -311,6 +325,16 @@ void Map::ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool b
     {
         // 更新每一个mp在世界坐标系下的坐标
         MapPoint *pMP = *sit;
+        /**
+         * notes:
+         *      1. 记住不要与回环的相似变换弄混了，相似变换是平移没有尺度问题，在其中一个坐标系有尺度问题
+         *      2. 这里实际上是单目视觉是基于某个未知的尺度为单位构建的地图，这个单位决定了地图点的坐标，也决定了位姿中的平移的大小
+         *      3. 只需要对地图点坐标和平移使用同一个尺度进行缩放即可
+         *      4. tyw已经恢复完尺度了：
+         *          4.1 Tyc = Tyw * Twc
+         *          4.2 Twc.translation() *= s
+         *          4.3 从这里可以验证我对上面BUG的阐述，因为tyw = Ryw * twc + tyw，但是tyw的尺度并不是直接对其乘以尺度s，而是恢复twc的尺度
+         */
         pMP->SetWorldPos(s * Ryw * pMP->GetWorldPos() + tyw);
         pMP->UpdateNormalAndDepth();
     }

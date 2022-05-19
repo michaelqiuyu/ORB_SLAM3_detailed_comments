@@ -177,7 +177,7 @@ void LocalMapping::Run()
                         float dist = (mpCurrentKeyFrame->mPrevKF->GetCameraCenter() - mpCurrentKeyFrame->GetCameraCenter()).norm() +
                                 (mpCurrentKeyFrame->mPrevKF->mPrevKF->GetCameraCenter() - mpCurrentKeyFrame->mPrevKF->GetCameraCenter()).norm();
                         // 如果距离大于5厘米，记录当前KF和上一KF时间戳的差，累加到mTinit
-                        if(dist>0.05)
+                        if(dist>0.05)  // IMU有一定的激励，不然误差会很大
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
                         // 当前关键帧所在的地图尚未完成IMU BA2（IMU第三阶段初始化）
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
@@ -337,7 +337,7 @@ void LocalMapping::Run()
                 break;
         }
         // 查看是否有复位线程的请求
-        ResetIfRequested();
+        ResetIfRequested();  // mbBadImu = false
 
         // Tracking will see that Local Mapping is busy
         // 开始接收关键帧
@@ -408,6 +408,9 @@ void LocalMapping::ProcessNewKeyFrame()
             {
                 if(!pMP->IsInKeyFrame(mpCurrentKeyFrame))
                 {
+                    // 在一个普通帧判定为关键帧的时候，构造KeyFrame的时候，并没有对KF中的地图点添加当前关键帧的观测，这些点实际上都是跟踪得到的
+                    // 由于这个地图点很早就生成了，因此不用进行是否删除的判断了
+
                     // 如果地图点不是来自当前帧的观测，为当前地图点添加观测
                     pMP->AddObservation(mpCurrentKeyFrame, i);
                     // 获得该点的平均观测方向和观测距离范围
@@ -420,6 +423,14 @@ void LocalMapping::ProcessNewKeyFrame()
                     // 如果当前帧中已经包含了这个地图点,但是这个地图点中却没有包含这个关键帧的信息
                     // 这些地图点可能来自双目或RGBD跟踪过程中新生成的地图点，或者是CreateNewMapPoints 中通过三角化产生
                     // 将上述地图点放入mlpRecentAddedMapPoints，等待后续MapPointCulling函数的检验
+
+                    /**
+                     * notes:
+                     *      1. 这个关键帧代表了局部建图线程的最新关键帧，这里的地图点是双目情形在createKF函数里面新生成的地图点
+                     *      2. 从双目生成地图点的逻辑可以看出，能跟踪到就不生成，没有跟踪到就生成，因此这里添加的都是新建的地图点
+                     *      3. mlpRecentAddedMapPoints本身就非空，含有上次localmap没有删除的地图点，但是与这里的地图点肯定不会有重合
+                     */
+
                     mlpRecentAddedMapPoints.push_back(pMP);
                 }
             }
@@ -1549,20 +1560,23 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     lpKF.push_front(pKF);
     // 同样内容再构建一个和lpKF一样的容器vpKF
     vector<KeyFrame*> vpKF(lpKF.begin(),lpKF.end());
+    // xc's todo: 这里统计的关键帧的数量与mpAtlas->KeyFramesInMap()有什么不同吗？
     if(vpKF.size()<nMinKF)
         return;
 
     mFirstTs=vpKF.front()->mTimeStamp;
     if(mpCurrentKeyFrame->mTimeStamp-mFirstTs<minTime)
         return;
+    // 执行IMU初始化需要有一定数量的关键帧和经历了一段时间之后
 
-    // 正在做IMU的初始化，在tracking里面使用，如果为true，暂不添加关键帧
+    // 正在做IMU的初始化，在tracking里面使用，如果为false，暂不添加关键帧
     bInitializing = true;
 
     // 先处理新关键帧，防止堆积且保证数据量充足
     while(CheckNewKeyFrames())
     {
         ProcessNewKeyFrame();
+        // 这里的mpCurrentKeyFrame与KeyFrame* pKF = mpCurrentKeyFrame是不同的，这里是Track线程最近插入的
         vpKF.push_back(mpCurrentKeyFrame);
         lpKF.push_back(mpCurrentKeyFrame);
     }
@@ -1582,15 +1596,32 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         int have_imu_num = 0;
         for(vector<KeyFrame*>::iterator itKF = vpKF.begin(); itKF!=vpKF.end(); itKF++)
         {
+            // 当前关键帧到上一个关键帧之间的预积分
             if (!(*itKF)->mpImuPreintegrated)
                 continue;
-            if (!(*itKF)->mPrevKF)
+            if (!(*itKF)->mPrevKF)  // 第一帧
                 continue;
 
             have_imu_num++;
-            // 初始化时关于速度的预积分定义Ri.t()*(s*Vj - s*Vi - Rwg*g*tij)
+            /**
+             * notes:
+             *      1. 初始化时关于速度的预积分定义△Vij = Ri.t()*(s*Vj - s*Vi - Rwg*g*tij)→ Ri * △Vij = sVj - sVi - Rwg * g * tij
+             *      2. ∑Ri * △Vij = sVn - Rwg * g * △t
+             *      3. 忽略sVn的影响
+             */
             dirG -= (*itKF)->mPrevKF->GetImuRotation() * (*itKF)->mpImuPreintegrated->GetUpdatedDeltaVelocity();
             // 求取实际的速度，位移/时间
+            /**
+             * notes:
+             *      1. 这里的GetImuPosition获取的是根据相机位姿和相机与IMU的外参计算得到的
+             *      2. 由于还没有进行IMU世界系与相机世界系的对齐，因此这里的GetImuPosition是在第一个相机系下的
+             *      3. 对于单目而言，此时的相机位姿是没有尺度的，但是外参是有尺度的，得到的GetImuPosition却是尺度模糊的，
+             *      4. 一部分有尺度，另一部分没有尺度，也就是mOwb = Rwc * tcb + twc，这里tcb是有尺度的，twc是没有尺度的
+             *      5. mOwb1 = Rwc1 * tcb + twc1, mOwb2 = Rwc2 * tcb + twc2, 从而mOwb2 - mOwb1 = Rwc2 * tcb - Rwc1 * tcb + twc2 - twc1
+             *      6. 如果假设Rwc1与Rwc2接近的话，倒是可以认为mOwb2 - mOwb1 = twc2 - twc1，是没有尺度的
+             *      7. 总之，这里看成是在第一帧相机系下的速度即可，至于速度的尺度信息后面应该会修正
+             *      8. todo: 检查后面有对速度的尺度进行修正吗？
+             */
             Eigen::Vector3f _vel = ((*itKF)->GetImuPosition() - (*itKF)->mPrevKF->GetImuPosition())/(*itKF)->mpImuPreintegrated->dT;
             (*itKF)->SetVelocity(_vel);
             (*itKF)->mPrevKF->SetVelocity(_vel);
@@ -1603,6 +1634,17 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             mbBadImu = true;
             return;
         }
+
+        /**
+         * 此处实际上是忽略Vn认为dirG的方向就是在当前世界系里面的重力方向，然后计算原始的重力的世界系到当前世界系的变换
+         * 也就是已知原始的x（下面的gI）和变换后的y（dirG），求x→y的变换，也就是y = Rx，求R
+         * 当然这里利用了几何间的关系进行求解，逻辑简单，计算方式是计算x旋转到y的轴角，这里可以使用二维情形来验证
+         * 这里g系代表着重力方向为(0, 0, -1)，但在第一帧下近似为dirG
+         *
+         * notes:
+         *      1. 此处忽略Vn的影响导致求得的R必然是不准确的，而且这种不准确与Vn的大小密切相关；仅能作为初值用于后面对R的精确化求解
+         *      2. 这里需要一定的关键帧的数量和时间间隔，是否也是为了让Vn在dirG中的占比减小？应该是这样
+         */
 
         // dirG = sV1 - sVn + n*Rwg*g*t
         // 归一化
@@ -1625,7 +1667,13 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     }
     else
     {
+        /**
+         * xc's todo: 为什么第一次初始化之后就是用默认值进行优化？
+         *      1. 经过第一次优化后坐标系已经经过了偏转，已经偏转到当前优化出来的g = (0, 0,-1)对应世界系下面了
+         *      2. 在偏转后的世界系与真实的世界系之间的差距已经很小了，因此直接使用单位阵即可
+         */
         mRwg = Eigen::Matrix3d::Identity();
+        // notes: 第一次优化时为0，之后既然已经有了优化值，当然是用之前的优化值来作为初值进行优化
         mbg = mpCurrentKeyFrame->GetGyroBias().cast<double>();
         mba = mpCurrentKeyFrame->GetAccBias().cast<double>();
     }
@@ -1641,6 +1689,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
     // 尺度太小的话初始化认为失败
+    // xc's todo: 为什么尺度很小就是失败的，这里的尺度由什么决定的
     if (mScale<1e-1)
     {
         cout << "scale too small" << endl;
@@ -1654,11 +1703,13 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     {
         unique_lock<mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
         // 尺度变化超过设定值，或者非单目时（无论带不带imu，但这个函数只在带imu时才执行，所以这个可以理解为双目imu）
-        if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {
+        if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {  // 非单目需要虽说不需要变换尺度，但是需要变换坐标系到原始重力坐标系
             // 4.1 恢复重力方向与尺度信息
+            // xc's todo: map的世界系是原始重力的世界系吗？答案是是的，因此后面才会直接将重力方向设置为(0, 0, -1)
             Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
             mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
             // 4.2 更新普通帧的位姿，主要是当前帧与上一帧
+            // 上面更新了关键帧的世界系，在这里就不用更新世界系了，只需要更新普通帧的位姿
             mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
         }
 
@@ -1675,6 +1726,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     // TODO 这步更新是否有必要做待研究，0.4版本是放在FullInertialBA下面做的
     // 这个版本FullInertialBA不直接更新位姿及三位点了
+    // xc's todo: 再次进行更新的目的是什么？
     mpTracker->UpdateFrameIMU(1.0,vpKF[0]->GetImuBias(),mpCurrentKeyFrame);
 
     // 设置经过初始化了
@@ -1742,13 +1794,15 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             {
                 // pChild->GetPose()也是优化前的位姿，Twc也是优化前的位姿
                 // 7.3 因此他们的相对位姿是比较准的，可以用于更新pChild的位姿
+                // 认为子关键帧与父关键帧具有相同的的变动
                 Sophus::SE3f Tchildc = pChild->GetPose() * Twc;
                 // 使用相对位姿，根据pKF优化后的位姿更新pChild位姿，最后结果都暂时放于mTcwGBA
                 pChild->mTcwGBA = Tchildc * pKF->mTcwGBA;
 
                 // 7.4 使用相同手段更新速度
-                Sophus::SO3f Rcor = pChild->mTcwGBA.so3().inverse() * pChild->GetPose().so3();
+                Sophus::SO3f Rcor = pChild->mTcwGBA.so3().inverse() * pChild->GetPose().so3();  // 旧世界系到新世界系
                 if(pChild->isVelocitySet()){
+                    // v→Rw`b * Rbw * v = Rw`c * Rcw * v
                     pChild->mVwbGBA = Rcor * pChild->GetVelocity();
                 }
                 else {
@@ -1807,6 +1861,8 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
             if(pRefKF->mnBAGlobalForKF!=GBAid)
                 continue;
+
+            // notes: 保证地图点的相机系坐标不发生改变，因此当相机位姿发生改变的时候，同步更改地图点的世界系坐标，这样重投影误差不会发生改变
 
             // Map to non-corrected camera
             // 8.2 根据优化前的世界坐标系下三维点的坐标以及优化前的关键帧位姿计算这个点在关键帧下的坐标
@@ -1875,6 +1931,7 @@ void LocalMapping::ScaleRefinement()
     // 2. 更新旋转与尺度
     // 待优化变量的初值
     mRwg = Eigen::Matrix3d::Identity();
+    // xc's todo: 为什么尺度的初值为1，不能使用视觉两帧之间的间距以及IMU推算的两帧之间的间距进行计算吗？答案：前面已经做了尺度优化，这里的尺度1是一个不错的初值了
     mScale=1.0;
 
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
@@ -1882,6 +1939,7 @@ void LocalMapping::ScaleRefinement()
     Optimizer::InertialOptimization(mpAtlas->GetCurrentMap(), mRwg, mScale);
     std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
+    // xc's todo: 为什么尺度很小的时候就是错误的？答案：尺度经过IMU初始化的优化后，不应该出现剧烈的变化
     if (mScale<1e-1) // 1e-1
     {
         cout << "scale too small" << endl;

@@ -310,12 +310,13 @@ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
     // Step 3.更新协方差，frost经典预积分论文的第63个公式，推导了噪声（ηa, ηg）对dR dV dP 的影响
     C.block<9, 9>(0, 0) = A * C.block<9, 9>(0, 0) * A.transpose() + B * Nga * B.transpose();  // B矩阵为9*6矩阵 Nga 6*6对角矩阵，3个陀螺仪噪声的平方，3个加速度计噪声的平方
     // 这一部分最开始是0矩阵，随着积分次数增加，每次都加上随机游走，偏置的信息矩阵
-    C.block<6, 6>(9, 9) += NgaWalk;
+    C.block<6, 6>(9, 9) += NgaWalk;  // 每次随机游走独立同分布
 
     // Update rotation jacobian wrt bias correction
     // 计算偏置的雅克比矩阵，r对bg的导数，∂ΔRij/∂bg = (ΔRjj-1) * ∂ΔRij-1/∂bg - Jr(j-1)*t
     // 论文作者对forster论文公式的基础上做了变形，然后递归更新，参见 https://github.com/UZ-SLAMLab/ORB_SLAM3/issues/212
     // ? 为什么先更新JPa、JPg、JVa、JVg最后更新JRg? 答：这里必须先更新dRi才能更新到这个值，但是为什么JPg和JVg依赖的上一个JRg值进行更新的？
+    // 这里更新顺序为JPa、JPg、JVa、JVg、JRg是因为在递推公式中，需要使用上一个时刻的值，这个从公式里面可以很容易看出
     JRg = dRi.deltaR.transpose() * JRg - dRi.rightJ * dt;
 
     // Total integrated time
@@ -345,7 +346,7 @@ void Preintegrated::MergePrevious(Preintegrated *pPrev)
     const std::vector<integrable> aux1 = pPrev->mvMeasurements;
     const std::vector<integrable> aux2 = mvMeasurements;
 
-    Initialize(bav);
+    Initialize(bav);  // 使用当前更新后的零偏来初始化
     for (size_t i = 0; i < aux1.size(); i++)
         IntegrateNewMeasurement(aux1[i].a, aux1[i].w, aux1[i].t);
     for (size_t i = 0; i < aux2.size(); i++)

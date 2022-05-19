@@ -119,7 +119,7 @@ public:
 
     // Tracking states
     enum eTrackingState{
-        SYSTEM_NOT_READY=-1,
+        SYSTEM_NOT_READY=-1,  // 系统没有准备好的状态，一般就是在启动后架子配置文件和词袋文件时候的状态
         NO_IMAGES_YET=0,
         NOT_INITIALIZED=1,
         OK=2,

@@ -180,7 +180,7 @@ Eigen::Matrix3f Pinhole::toK_()
  * @param R12 2->1的旋转
  * @param t12 2->1的平移
  * @param sigmaLevel 特征点1的尺度的平方
- * @param unc 特征点2的尺度的平方，1.2^2n
+ * @param unc 特征点2的尺度的平方，1.2^2n，数学意义为假设的方差
  * @return 三维点恢复的成功与否
  */
 bool Pinhole::epipolarConstrain(

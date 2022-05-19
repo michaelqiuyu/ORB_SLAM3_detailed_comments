@@ -654,6 +654,9 @@ void Tracking::newParameterLoader(Settings *settings) {
 /**
  * @brief 根据文件读取相机参数，可快速略过不看
  * @param fSettings 配置文件
+ *
+ * notes:
+ *      1. 多相机只有鱼眼相机情形，没有针孔相机情形
  */
 bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
 {
@@ -1056,6 +1059,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             node = fSettings["Camera.lappingBegin"];
             if(!node.empty() && node.isInt())
             {
+                // 以整数形式返回节点内容。如果节点存储浮点数，则对其进行四舍五入
                 leftLappingBegin = node.operator int();
             }
             else
@@ -1213,7 +1217,12 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         cv::FileNode node = fSettings["ThDepth"];
         if(!node.empty()  && node.isReal())
         {
-            mThDepth = node.real();
+            mThDepth = node.real();  // 配置文件中的ThDepth表示基线的倍数，是一个没有量纲的数值
+            /**
+             * notes:
+             *      1. 实际上就是ThDepth * b，也就是以基线的多少倍为阈值；
+             *      2. 基线越长，视野越大，而且三角化的准确度也越高（见slam14讲，三角化精度与视差的关系），阈值也就可以设置的越大
+             */
             mThDepth = mbf*mThDepth/fx;
             cout << endl << "Depth Threshold (Close/Far Points): " << mThDepth << endl;
         }
@@ -1382,7 +1391,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
 
 
 
-    float Ng, Na, Ngw, Naw;
+    float Ng, Na, Ngw, Naw;  // 都是对应的方差
 
     node = fSettings["IMU.Frequency"];
     if(!node.empty() && node.isInt())
@@ -1573,7 +1582,7 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
             mDistCoef,              // 去畸变参数
             mbf,                    // 基线长度
             mThDepth,				// 远点,近点的区分阈值
-            mpCamera);				// 相机模型
+            mpCamera);				// 相机模型，只有一个相机
     else if(mSensor == System::STEREO && mpCamera2)
         mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr);
     else if(mSensor == System::IMU_STEREO && !mpCamera2)
@@ -1695,7 +1704,7 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
     }
     else if(mSensor == System::IMU_MONOCULAR)
     {
-        // 判断该帧是不是初始化
+        // 判断该帧是不是初始化，区别在于构建的特征提取器
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)  //没有成功初始化的前一个状态就是NO_IMAGES_YET
         {
             mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
@@ -1970,7 +1979,6 @@ void Tracking::ResetFrameIMU()
  */
 void Tracking::Track()
 {
-
     if (bStepByStep)
     {
         std::cout << "Tracking: Waiting to the next step" << std::endl;
@@ -2054,6 +2062,11 @@ void Tracking::Track()
 
     mLastProcessedState=mState;
     // Step 4 IMU模式且没有创建地图的情况下对IMU数据进行预积分
+    /**
+     * notes:
+     *      1. 此处的含义有些不清楚，创建地图的时候CreateMapInAtlas，mbCreatedMap=True，这个含义应该是刚刚创建地图，还没有图片信息，自然不需要预积分
+     *      2. 一旦有图片进来后，mbCreatedMap=false，这个时候就需要预积分了
+     */
     if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mbCreatedMap)
     {
 #ifdef REGISTER_TIMES
@@ -2352,6 +2365,7 @@ void Tracking::Track()
                     else if(bOKReloc)
                     {
                         // 只要重定位成功整个跟踪过程正常进行（重定位与跟踪，更相信重定位）
+                        // 不需要赋值操作，因为重定位是后做的
                         mbVO = false;
                     }
                     // 有一个成功我们就认为执行成功了
@@ -2425,6 +2439,7 @@ void Tracking::Track()
             mState = OK;
         else if (mState == OK)  // 由上图可知只有当第一阶段跟踪成功，但第二阶段局部地图跟踪失败时执行
         {
+            // 如果第一阶段不成功，那么mState就不会是OK了，而是会赋值为其他状态
             // 状态变为最近丢失
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             {
@@ -2546,6 +2561,7 @@ void Tracking::Track()
             // 临时地图点仅仅是为了提高双目或rgbd摄像头的帧间跟踪效果，用完以后就扔了，没有添加到地图中
             for(list<MapPoint*>::iterator lit = mlpTemporalPoints.begin(), lend =  mlpTemporalPoints.end(); lit!=lend; lit++)
             {
+
                 MapPoint* pMP = *lit;
                 delete pMP;
             }
@@ -3296,6 +3312,7 @@ void Tracking::UpdateLastFrame()
         bool bCreateNew = false;
 
         // 如果这个点对应在上一帧中的地图点没有,或者创建后就没有被观测到,那么就生成一个临时的地图点
+        // 双目直接获得三维点，当前帧的三维点在上一帧是否也能看到；能看到就可以根据之后的投影获得匹配，没有看到就可以创建
         MapPoint* pMP = mLastFrame.mvpMapPoints[i];
 
         if(!pMP)
@@ -3318,6 +3335,10 @@ void Tracking::UpdateLastFrame()
             }
 
             // 加入上一帧的地图点中
+            /**
+             * notes:
+             *      1. 请一定注意，这个地图点没有任何观测信息，仅仅用于增强track，后面会删除
+             */
             MapPoint* pNewMP = new MapPoint(x3D,mpAtlas->GetCurrentMap(),&mLastFrame,i);
             mLastFrame.mvpMapPoints[i]=pNewMP;
 
@@ -3405,6 +3426,7 @@ bool Tracking::TrackWithMotionModel()
     {
         Verbose::PrintMess("Not enough matches!!", Verbose::VERBOSITY_NORMAL);
         if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+            // 视觉的位姿需要通过特征点来进行计算，如果纹理不丰富，那么计算的位姿也就不准确；但是IMU可以直接递推，短时间的准确率也很好
             return true;
         else
             return false;
@@ -3513,6 +3535,7 @@ bool Tracking::TrackLocalMap()
             // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
             // mbMapUpdated变化见Tracking::PredictStateIMU()
             // 未更新地图
+            // 二三阶段初始化，尺度更新，局部地图优化，回环或者地图融合
             if(!mbMapUpdated) //  && (mnMatchesInliers>30))
             {
                 Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
@@ -3629,6 +3652,7 @@ bool Tracking::NeedNewKeyFrame()
     {
         // 如果是IMU模式，当前帧距离上一关键帧时间戳超过0.25s，则说明需要插入关键帧，不再进行后续判断
         if (mSensor == System::IMU_MONOCULAR && (mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.25)
+            // 这个判断说明IMU模式下，关键帧的数量会非常大，0.25s就要创建，当然时间过长的话，IMU递推的结果就不一定准确了
             return true;
         else if ((mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && (mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.25)
             return true;
@@ -3768,6 +3792,7 @@ bool Tracking::NeedNewKeyFrame()
     }
 
     // 新增的条件c4：单目+IMU模式下，当前帧匹配内点数在15~75之间或者是RECENTLY_LOST状态，c4=true
+    // 跟踪的不好，需要立即生成关键帧，创建新的地图点，保证跟踪的继续前进
     bool c4 = false;
     if ((((mnMatchesInliers<75) && (mnMatchesInliers>15)) || mState==RECENTLY_LOST) && (mSensor == System::IMU_MONOCULAR)) // MODIFICATION_2, originally ((((mnMatchesInliers<75) && (mnMatchesInliers>15)) || mState==RECENTLY_LOST) && ((mSensor == System::IMU_MONOCULAR)))
         c4=true;
@@ -3787,6 +3812,7 @@ bool Tracking::NeedNewKeyFrame()
         }
         else
         {
+            // 局部线程不支持插入关键帧，停掉局部线程的BA
             mpLocalMapper->InterruptBA();
             if(mSensor!=System::MONOCULAR  && mSensor!=System::IMU_MONOCULAR)
             {
@@ -3910,6 +3936,14 @@ void Tracking::CreateNewKeyFrame()
                     mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
                 }
 
+                /**
+                 * notes: 有关双目地图点的使用方法
+                 *      1. 在跟踪的时候，检查上一帧是否有双目重建出来但是没有跟踪出来的地图点，重建地图点，并添加到上一帧和临时容器中，但是这个地图点并没有添加观测信息（实际上不是由关键帧生成的，也不会有观测信息）
+                 *      2. 由于在投影匹配中，当前帧可能获取到了这里临时地图点，这里可以根据观测将其删除；删除的理由可能是前一帧后当前帧都能看到这个地图点，当前帧应该距离地图点更近，三角化误差更小（ORB中的相机似乎都是前置的，这样说似乎也没问题）
+                 *      3. 生成关键帧之前，将1中生成的地图点全部删除了，不过好像未必真的删除了
+                 *      4. 在当前帧中重新生成地图点，并添加观测信息
+                 */
+
                 // 如果需要就新建地图点，这里的地图点不是临时的，是全局地图中新建地图点，用于跟踪
                 if(bCreateNew)
                 {
@@ -3934,7 +3968,7 @@ void Tracking::CreateNewKeyFrame()
                         pKF->AddMapPoint(pNewMP,mCurrentFrame.Nleft + mCurrentFrame.mvLeftToRightMatch[i]);
                     }
 
-                    pKF->AddMapPoint(pNewMP,i);
+                    pKF->AddMapPoint(pNewMP,i);  // notes：如果是非结构化双目，这里实际上执行了两次pKF->AddMapPoint，但是索引确是不一样的，这是为了保存另一个相机对这个地图点的观测
                     pNewMP->ComputeDistinctiveDescriptors();
                     pNewMP->UpdateNormalAndDepth();
                     mpAtlas->AddMapPoint(pNewMP);
@@ -3951,7 +3985,7 @@ void Tracking::CreateNewKeyFrame()
                 // Step 3.4：停止新建地图点必须同时满足以下条件：
                 // 1、当前的点的深度已经超过了设定的深度阈值（35倍基线）
                 // 2、nPoints已经超过100个点，说明距离比较远了，可能不准确，停掉退出
-                if(vDepthIdx[j].first>mThDepth && nPoints>maxPoint)
+                if(vDepthIdx[j].first>mThDepth && nPoints>maxPoint)  // nPoints比较大，说明正常的地图点比较多，并不需要重新创建
                 {
                     break;
                 }
@@ -4778,6 +4812,7 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
     // mlRelativeFramePoses 存放的是Tcr
     // 三个变量一一对应
     // 这部分操作貌似没用
+    // xc's todo: 关注这里的位姿在哪里使用了
     for(auto lit=mlRelativeFramePoses.begin(),lend=mlRelativeFramePoses.end();lit!=lend;lit++, lRit++, lbL++)
     {
         if(*lbL)
@@ -4792,6 +4827,7 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
 
         if(pKF->GetMap() == pMap)
         {
+            // 恢复普通帧的尺度，这里的相对位姿是track里面获得的，在没有根据IMU计算尺度之前也是没有尺度的
             (*lit).translation() *= s;
         }
     }
@@ -4810,7 +4846,7 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
     }
 
     // TODO 如果上一帧正好是上一帧的上一关键帧（mLastFrame.mpLastKeyFrame与mLastFrame不可能是一个，可以验证一下）
-    if(mLastFrame.mnId == mLastFrame.mpLastKeyFrame->mnFrameId)
+    if(mLastFrame.mnId == mLastFrame.mpLastKeyFrame->mnFrameId)  // 如果mLastFrame就是关键帧
     {
         mLastFrame.SetImuPoseVelocity(mLastFrame.mpLastKeyFrame->GetImuRotation(),
                                       mLastFrame.mpLastKeyFrame->GetImuPosition(),
@@ -4824,6 +4860,12 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
         const Eigen::Vector3f Vwb1 = mLastFrame.mpLastKeyFrame->GetVelocity();
         float t12 = mLastFrame.mpImuPreintegrated->dT;
         // 根据mLastFrame的上一个关键帧的信息（此时已经经过imu初始化了，所以关键帧的信息都是校正后的）以及imu的预积分重新计算上一帧的位姿
+        /**
+         * 这里的做法可能跟逻辑稍微有一些不同，从逻辑上讲，一般直接根据pi等去计算pj，但是这里实际上是根据预计分量△pij去计算pj的
+         * 因此需要对预积分公式做一些变形，获得pj关于预计分量的式子
+         *
+         * 由于使用了SetNewBias，因此这里使用GetUpdatedDeltaRotation等方法
+         */
         mLastFrame.SetImuPoseVelocity(IMU::NormalizeRotation(Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaRotation()),
                                       twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaPosition(),
                                       Vwb1 + Gz*t12 + Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
