@@ -1535,7 +1535,12 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
                                        const LoopClosing::KeyFrameAndPose &NonCorrectedSim3,
                                        const LoopClosing::KeyFrameAndPose &CorrectedSim3,
                                        const map<KeyFrame *, set<KeyFrame *> > &LoopConnections, const bool &bFixScale)
-{   
+{
+    /**
+     * notes:
+     *      1. NonCorrectedSim3与CorrectedSim3对应的键是一样的，这个可以从这两个map的生成中看到
+     *      2. CorrectedSim3对应的关键帧的位姿已经setpose进去了
+     */
     // Setup optimizer
     g2o::SparseOptimizer optimizer;
     optimizer.setVerbose(false);
@@ -1576,14 +1581,15 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
 
         if(it!=CorrectedSim3.end())
         {
-            vScw[nIDi] = it->second;
+            vScw[nIDi] = it->second;  // 矫正后的位姿
             VSim3->setEstimate(it->second);
         }
         else
         {
+            // 不在CorrectedSim3也就不在NonCorrectedSim3中，通过关键帧获得位姿
             Sophus::SE3d Tcw = pKF->GetPose().cast<double>();
             g2o::Sim3 Siw(Tcw.unit_quaternion(),Tcw.translation(),1.0);
-            vScw[nIDi] = Siw;
+            vScw[nIDi] = Siw;  // 原始位姿
             VSim3->setEstimate(Siw);
         }
 
@@ -1595,6 +1601,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
         VSim3->_fix_scale = bFixScale;
 
         optimizer.addVertex(VSim3);
+        // 对Z轴的旋转
         vZvectors[nIDi]=vScw[nIDi].rotation()*z_vec; // For debugging
 
         vpVertices[nIDi]=VSim3;
@@ -1603,7 +1610,15 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
 
     set<pair<long unsigned int,long unsigned int> > sInsertedEdges;
 
-    const Eigen::Matrix<double,7,7> matLambda = Eigen::Matrix<double,7,7>::Identity();
+    const Eigen::Matrix<double,7,7> matLambda = Eigen::Matrix<double,7,7>::Identity();  // 这个表明轴角、平移向量、尺度s具有相同的方差，因此给与相同的权重
+
+    /**
+     * notes:
+     *      1. 在这里的四种边（不含惯性）中，只有第一种LoopConnections的边使用了CorrectedSim3位姿，其余都是使用了原始位姿，也就是从Tcw计算得到的
+     *      2. 在这里并没有引入额外的传感器信息，位子图优化能够进行下去的原因是有一些顶点，其与其他顶点构成边，而边的误差计算使用的顶点的sim3值是不同的
+     *      3. 例如，O1 - O2 - O3 有三个顶点，其中O1 - O2是一条边，O2 - O3是一条边；在O1 - O2的观测计算的时候，O2的姿态使用的是
+     *         CorrectedSim3中的值；而O2 - O3的观测计算的时候，O2的姿态使用的位姿是Tcw计算得到的
+     */
 
     // Set Loop edges
     int count_loop = 0;
@@ -1618,6 +1633,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
         for(set<KeyFrame*>::const_iterator sit=spConnections.begin(), send=spConnections.end(); sit!=send; sit++)
         {
             const long unsigned int nIDj = (*sit)->mnId;
+            // 当权重比较小的时候，只有在nIDi=pCurKF->mnId且nIDj=pLoopKF->mnId时候才考虑
             if((nIDi!=pCurKF->mnId || nIDj!=pLoopKF->mnId) && pKF->GetWeight(*sit)<minFeat)
                 continue;
 
@@ -1649,8 +1665,14 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
         LoopClosing::KeyFrameAndPose::const_iterator iti = NonCorrectedSim3.find(pKF);
 
         if(iti!=NonCorrectedSim3.end())
+            /*
+             * author: xiongchao
+             * 在这里不直接使用vScw的原因是vScw中存储了sim3变换，如果pKF在NonCorrectedSim3中的话，那么也会在CorrectedSim3中；
+             * 对于跟踪形成的边，只使用尺度为1的位姿
+             */
             Swi = (iti->second).inverse();
         else
+            // 不在NonCorrectedSim3也就不在CorrectedSim3中，因此vScw此时对应的是没有矫正的位姿，原始的位姿
             Swi = vScw[nIDi].inverse();
 
         KeyFrame* pParentKF = pKF->GetParent();
@@ -1664,6 +1686,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
 
             LoopClosing::KeyFrameAndPose::const_iterator itj = NonCorrectedSim3.find(pParentKF);
 
+            // 跟上面一样，使用的是原始的位姿
             if(itj!=NonCorrectedSim3.end())
                 Sjw = itj->second;
             else
@@ -1757,8 +1780,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
             optimizer.addEdge(ep);
         }
     }
-
-
+    
     optimizer.initializeOptimization();
     optimizer.computeActiveErrors();
     optimizer.optimize(20);
@@ -1772,6 +1794,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
 
         const int nIDi = pKFi->mnId;
 
+        // 这里就不用区分有没有矫正了，优化后的位姿即为所求
         g2o::VertexSim3Expmap* VSim3 = static_cast<g2o::VertexSim3Expmap*>(optimizer.vertex(nIDi));
         g2o::Sim3 CorrectedSiw =  VSim3->estimate();
         vCorrectedSwc[nIDi]=CorrectedSiw.inverse();
@@ -1799,12 +1822,12 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
             KeyFrame* pRefKF = pMP->GetReferenceKeyFrame();
             nIDr = pRefKF->mnId;
         }
-
-
+        
         g2o::Sim3 Srw = vScw[nIDr];
         g2o::Sim3 correctedSwr = vCorrectedSwc[nIDr];
 
         Eigen::Matrix<double,3,1> eigP3Dw = pMP->GetWorldPos().cast<double>();
+        // 保持地图点在参考关键帧中的坐标不变，因为地图点基本是由参考关键帧生成的，因此在其坐标系下没有尺度问题
         Eigen::Matrix<double,3,1> eigCorrectedP3Dw = correctedSwr.map(Srw.map(eigP3Dw));
         pMP->SetWorldPos(eigCorrectedP3Dw.cast<float>());
 
@@ -1815,6 +1838,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
     pMap->IncreaseChangeIndex();
 }
 
+// xc's todo: 这个优化真的能够运行吗，好像初始值就是最优值了（取决于输入的观测）
 void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFixedKFs, vector<KeyFrame*> &vpFixedCorrectedKFs,
                                        vector<KeyFrame*> &vpNonFixedKFs, vector<MapPoint*> &vpNonCorrectedMPs)
 {
@@ -1975,6 +1999,7 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
             g2o::Sim3 Sjw;
             bool bHasRelation = false;
 
+            // 这里的两个判断在于避免一个来自vpFixedKFs，一个来自vpNonFixedKFs
             if(vpGoodPose[nIDi] && vpGoodPose[nIDj])
             {
                 // 这个判断表明两帧都是vpFixedCorrectedKFs或vpFixedKFs，在这种情况下，顶点其实都不优化，bHasRelation最好设置称false
