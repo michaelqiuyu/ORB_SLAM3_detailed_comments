@@ -171,10 +171,12 @@ int main(int argc, char **argv)
 
             double tframe = vTimestampsCam[seq][ni];
 
+
             if(imLeft.empty() || imRight.empty())
             {
                 cerr << endl << "Failed to load image at: "
-                     <<  vstrImageLeftFilenames[seq][ni] << endl;
+                     <<  vstrImageLeftFilenames[seq][ni] << " "
+                     << vstrImageRightFilenames[seq][ni] << endl;
                 return 1;
             }
 
@@ -294,6 +296,7 @@ void LoadImagesTUMVI(const string &strPathLeft, const string &strPathRight, cons
     vTimeStamps.reserve(5000);
     vstrImageLeft.reserve(5000);
     vstrImageRight.reserve(5000);
+
     while(!fTimes.eof())
     {
         string s;

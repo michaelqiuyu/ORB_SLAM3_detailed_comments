@@ -60,8 +60,10 @@ Eigen::Matrix3f RightJacobianSO3(const float &x, const float &y, const float &z)
     Eigen::Vector3f v;
     v << x, y, z;
     Eigen::Matrix3f W = Sophus::SO3f::hat(v);
+    // Jr = I + (1 - sin(theta) / therta) * n^ * n^ - ((1 - cos(theta)) / theta) * n^
     if (d < eps)
     {
+        // 对Jr求极限
         return I;
     }
     else
@@ -95,8 +97,10 @@ Eigen::Matrix3f InverseRightJacobianSO3(const float &x, const float &y, const fl
     v << x, y, z;
     Eigen::Matrix3f W = Sophus::SO3f::hat(v);
 
+    // Jr^-1 = (theta/2) * cot(theta/2) * I + (theta / 2) * n^ + (1 - (theta/2) * cot(theta/2)) * n.t() * n.t()
     if (d < eps)
     {
+        // 对theta取极限
         return I;
     }
     else
@@ -141,12 +145,17 @@ IntegratedRotation::IntegratedRotation(const Eigen::Vector3f &angVel, const Bias
     // eps = 1e-4 是一个小量，根据罗德里格斯公式求极限，后面的高阶小量忽略掉得到此式
     if (d < eps)
     {
+        // 指数映射，高阶项省略
         deltaR = Eigen::Matrix3f::Identity() + W;
+        // 注意Jr(fai） = Jl(-fai)
         rightJ = Eigen::Matrix3f::Identity();
     }
     else
     {
+        // 跟平时的公式有一些不一样，使用n^ * n^ = n * n.t() - I进行变换即可
+        // R = I + sin(theta) * n^ + (1 - cos(theta)) * n^ * n^
         deltaR = Eigen::Matrix3f::Identity() + W * sin(d) / d + W * W * (1.0f - cos(d)) / d2;
+        // Jr = I - n^ * (1 - cos(theta)) / theta + n^ * n^ * (1 - sin(theta)/theta))
         rightJ = Eigen::Matrix3f::Identity() - W * (1.0f - cos(d)) / d2 + W * W * (d - sin(d)) / (d2 * d);
     }
 }
@@ -273,6 +282,12 @@ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
 
     // Update delta position dP and velocity dV (rely on no-updated delta rotation)
     // 根据没有更新的dR来更新dP与dV  eq.(38)
+    /**
+     * notes:
+     *      1. 分离预积分各项的噪声之后，得到观测值
+     *      2. 对观测值，使用递推进行计算，也就是得到△Pij = f(△Pij-1)、△Vij = f(△Vij-1)、△Rij = f(△Rij-1)
+     *      3. 这里之所以按照P→V→R的顺序进行计算：△Pij中使用了△Vij-1和△Rij-1，因此计算△Pij的时候△Vij-1和△Rij-1不能更新为△Vij和△Rij；后面的相关计算也是基于这个理由
+     */
     dP = dP + dV * dt + 0.5f * dR * acc * dt * dt;
     dV = dV + dR * acc * dt;
 
@@ -289,6 +304,11 @@ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
     // Update position and velocity jacobians wrt bias correction
     // 因为随着时间推移，不可能每次都重新计算雅克比矩阵，所以需要做J(k+1) = j(k) + (~)这类事，分解方式与AB矩阵相同
     // 论文作者对forster论文公式的基础上做了变形，然后递归更新，参见 https://github.com/UZ-SLAMLab/ORB_SLAM3/issues/212
+    /**
+     * notes:
+     *      1. 使用递推的方式获取，因为数据是一帧一帧的得到的，并不是一次性得到了所有的数据，然后按照公式进行计算的
+     *      2. 也就是将i→j的变量的计算基于i→j-1
+     */
     JPa = JPa + JVa * dt - 0.5f * dR * dt * dt;
     JPg = JPg + JVg * dt - 0.5f * dR * dt * dt * Wacc * JRg;
     JVa = JVa - dR * dt;
@@ -310,6 +330,16 @@ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
     // Step 3.更新协方差，frost经典预积分论文的第63个公式，推导了噪声（ηa, ηg）对dR dV dP 的影响
     C.block<9, 9>(0, 0) = A * C.block<9, 9>(0, 0) * A.transpose() + B * Nga * B.transpose();  // B矩阵为9*6矩阵 Nga 6*6对角矩阵，3个陀螺仪噪声的平方，3个加速度计噪声的平方
     // 这一部分最开始是0矩阵，随着积分次数增加，每次都加上随机游走，偏置的信息矩阵
+    /**
+     * notes:
+     *      1. b(k+1) = b(k) + w(k+1)，此处可知b(k) = ∑w(k)；且w(i)与w(j)独立，故Var(b(k)) = k * NgaWalk，见：https://github.com/ethz-asl/kalibr/wiki/IMU-Noise-Model
+     *      2. 我们在使用零偏的时候一般认为其在一个时间段内是不变的，但是随着时间的递增，其分布的方差是随时间线性增长的
+     *      3. 注意这里的C只计算了分块对角矩阵，并没有计算右上角和左下角的矩阵，这是因为用不上
+     *      4. 注意在构建最小二乘优化的时候，权重矩阵是对应残差的，而不是对应求解的状态变量的，这一点很重要
+     *      5. 预积分的构建的残差只有9维，这里构建了15维的C，最后面六个维度用于限制零偏的优化范围，一般应用e = b - b'这种边
+     *      6. 构建的优化边，要么是惯性相关的，也就是与r△Rij、r△vij、r△pij相关，使用C的前9维；要么是用于限制零偏的优化范围的，使用C的后6维
+     *      7. 构建的优化边，没有同事包含r△Rij、r△vij、r△pij（至少其一）和bg、ba（至少其一）的，因此才不用计算C矩阵的右上角和左下角
+     */
     C.block<6, 6>(9, 9) += NgaWalk;  // 每次随机游走独立同分布
 
     // Update rotation jacobian wrt bias correction

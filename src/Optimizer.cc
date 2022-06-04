@@ -1914,9 +1914,10 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
         g2o::Sim3 Siw(Tcw.unit_quaternion(),Tcw.translation(),1.0);
 
         vCorrectedSwc[nIDi]=Siw.inverse();
-        VSim3->setEstimate(Siw);
+        VSim3->setEstimate(Siw);  // 估计值设置的是当前位姿
 
         Sophus::SE3d Tcw_bef = pKFi->mTcwBefMerge.cast<double>();  // 原始的位姿，表示没有矫正和优化前
+        // 保存的位姿是之前的位姿，后面计算边的误差的观测的时候使用的是这里的位姿
         vScw[nIDi] = g2o::Sim3(Tcw_bef.unit_quaternion(),Tcw_bef.translation(),1.0);
 
         VSim3->setFixed(true);
@@ -1949,7 +1950,8 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
         Sophus::SE3d Tcw = pKFi->GetPose().cast<double>();
         g2o::Sim3 Siw(Tcw.unit_quaternion(),Tcw.translation(),1.0);
 
-        vScw[nIDi] = Siw;  // 注意：这里并不是mTcwBefMerge，而是已经矫正的
+        // 注意这里保存的位姿和设置的估计值是一个值了
+        vScw[nIDi] = Siw;
         VSim3->setEstimate(Siw);
 
         VSim3->setFixed(false);
@@ -1998,6 +2000,11 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
 
             g2o::Sim3 Sjw;
             bool bHasRelation = false;
+            /**
+             * notes:
+             *      1. 在这里有可能有O1 - O2 - O3，其中O1为vpFixedKFs，O2为vpFixedCorrectedKFs，O3为vpNonFixedKFs
+             *      2. 那么对于O2而言，其与O1的边的观测计算使用的是矫正的位姿；其与O3的边的观测计算使用的是矫正前的位姿
+             */
 
             // 这里的两个判断在于避免一个来自vpFixedKFs，一个来自vpNonFixedKFs
             if(vpGoodPose[nIDi] && vpGoodPose[nIDj])
@@ -2008,6 +2015,7 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
             }
             else if(vpBadPose[nIDi] && vpBadPose[nIDj])  // 这个判断表明两帧来自vpFixedCorrectedKFs或vpNonFixedKFs
             {
+                // 这里使用的位姿是矫正前的位姿，也就是TcwBef
                 Sjw = vScw[nIDj];
                 bHasRelation = true;
             }
@@ -2154,11 +2162,13 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
             pRefKF = pMPi->GetReferenceKeyFrame();
         }
 
+        // 这里的vpNonCorrectedMPs都来自currentKF的地图中的地图点，这个地图中的关键帧的vpBadPose都是true
         if(vpBadPose[pRefKF->mnId])
         {
             Sophus::SE3f TNonCorrectedwr = pRefKF->mTwcBefMerge;
             Sophus::SE3f Twr = pRefKF->GetPoseInverse();
 
+            // 抱枕地图点在参考关键帧下的坐标是不变的，因此其在参考关键帧下的投影坐标也是不变的
             Eigen::Vector3f eigCorrectedP3Dw = Twr * TNonCorrectedwr.inverse() * pMPi->GetWorldPos();
             pMPi->SetWorldPos(eigCorrectedP3Dw);
 
@@ -3759,6 +3769,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
         {
             KeyFrame* pKF = mit->first;
             if(pKF->isBad() || pKF->mnId>maxKFid || pKF->mnBALocalForMerge != pMainKF->mnId || !pKF->GetMapPoint(get<0>(mit->second)))
+                // 不是vpFixedKF和vpAdjustKF中的关键帧
                 continue;
 
             nEdges++;
@@ -3858,10 +3869,10 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
 
             if(e->chi2()>5.991 || !e->isDepthPositive())
             {
-                e->setLevel(1);
+                e->setLevel(1);  // 后面的优化只对level=0进行优化
                 badMonoMP++;
             }
-            e->setRobustKernel(0);
+            e->setRobustKernel(0);  // 后面的优化不再使用Robust Kernel了
         }
 
         for(size_t i=0, iend=vpEdgesStereo.size(); i<iend;i++)
@@ -3882,7 +3893,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
         }
         Verbose::PrintMess("[BA]: First optimization(Huber), there are " + to_string(badMonoMP) + " monocular and " + to_string(badStereoMP) + " stereo bad edges", Verbose::VERBOSITY_DEBUG);
 
-    optimizer.initializeOptimization(0);
+    optimizer.initializeOptimization(0);  // 只优化level=0的边
     optimizer.optimize(10);
     }
 
@@ -3948,6 +3959,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
             pMPi->EraseObservation(pKFi);
         }
     }
+    // 调试代码
     for(unsigned int i=0; i < vpMPs.size(); ++i)
     {
         MapPoint* pMPi = vpMPs[i];
@@ -3963,7 +3975,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
 
             if(pKF->mvuRight[get<0>(mit->second)]<0) //Monocular
             {
-                mpObsFinalKFs[pKF]++;
+                mpObsFinalKFs[pKF]++;  // 调试用的变量，后面没有使用
             }
             else // RGBD or Stereo
             {
@@ -3983,6 +3995,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
         g2o::SE3Quat SE3quat = vSE3->estimate();
         Sophus::SE3f Tiw(SE3quat.rotation().cast<float>(), SE3quat.translation().cast<float>());
 
+        // 这些统计信息，也是调试所用，后面没有使用
         int numMonoBadPoints = 0, numMonoOptPoints = 0;
         int numStereoBadPoints = 0, numStereoOptPoints = 0;
         vector<MapPoint*> vpMonoMPsOpt, vpStereoMPsOpt;
@@ -3994,6 +4007,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
             MapPoint* pMP = vpMapPointEdgeMono[i];
             KeyFrame* pKFedge = vpEdgeKFMono[i];
 
+            // 遍历所有的边，其中顶点为这一个关键帧的边
             if(pKFi != pKFedge)
             {
                 continue;
@@ -4057,7 +4071,6 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
 
     }
 }
-
 
 void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbStopFlag, Map *pMap, LoopClosing::KeyFrameAndPose &corrPoses)
 {

@@ -588,7 +588,7 @@ void Tracking::newParameterLoader(Settings *settings) {
     mK_(0,2) = mpCamera->getParameter(2);
     mK_(1,2) = mpCamera->getParameter(3);
 
-    // 读取相机2
+    // 读取相机2，注意这里的判断是只有在KB8模型下才有camera2
     if((mSensor==System::STEREO || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD) &&
         settings->cameraType() == Settings::KannalaBrandt){
         mpCamera2 = settings->camera2();
@@ -599,7 +599,7 @@ void Tracking::newParameterLoader(Settings *settings) {
         mpFrameDrawer->both = true;
     }
 
-    // 读取双目
+    // 读取双目：左右目模式
     if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD ){
         mbf = settings->bf();
         mThDepth = settings->b() * settings->thDepth();
@@ -646,6 +646,12 @@ void Tracking::newParameterLoader(Settings *settings) {
     float Naw = settings->accWalk();
 
     const float sf = sqrt(mImuFreq);
+    /**
+     * notes:
+     *      1. 注意区分yaml文件设置的陀螺仪和加速度计的噪声和零偏是连续模型的值还是离散模型的值
+     *      2. 乘以sf相当于除以△t，除以sf相当于乘以△t
+     *      3. 从这里可以看出，读取的yaml的模型是连续模型，因此这里需要离散化
+     */
     mpImuCalib = new IMU::Calib(Tbc,Ng*sf,Na*sf,Ngw/sf,Naw/sf);
 
     mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
@@ -1791,6 +1797,11 @@ void Tracking::PreintegrateIMU()
                 else
                 {
                     // 得到两帧间的imu数据放入mvImuFromLastFrame中,得到后面预积分的处理数据
+                    /**
+                     * notes:
+                     *      1. 这里并没有pop_front了，因为下一次IMU预积分会用得上这个时刻的IMU测量值
+                     *      2. 这里的操作并不复杂，下面会做更复杂的插值操作
+                     */
                     mvImuFromLastFrame.push_back(*m);
                     break;
                 }
@@ -1807,7 +1818,7 @@ void Tracking::PreintegrateIMU()
 
     // Step 2.对两帧之间进行中值积分处理
     // m个imu组数据会有m-1个预积分量
-    const int n = mvImuFromLastFrame.size()-1;
+    const int n = mvImuFromLastFrame.size()-1;  // 注意这里减了1
     if(n==0){
         cout << "Empty IMU measurements vector!!!\n";
         return;
@@ -1839,6 +1850,10 @@ void Tracking::PreintegrateIMU()
             // 正常情况下时为了求上一帧到当前时刻imu的一个平均加速度，但是imu时间不会正好落在上一帧的时刻，需要做补偿，要求得a0时刻到上一帧这段时间加速度的改变量
             // 有了这个改变量将其加到a0上之后就可以表示上一帧时的加速度了。其中a0 - (a1-a0)*(tini/tab) 为上一帧时刻的加速度再加上a1 之后除以2就为这段时间的加速度平均值
             // 其中tstep表示a1到上一帧的时间间隔，a0 - (a1-a0)*(tini/tab)这个式子中tini可以是正也可以是负表示时间上的先后，(a1-a0)也是一样，多种情况下这个式子依然成立
+            /**
+             * 第一个IMU数据并不一定正好对应着图片数据，计算前一帧对应的IMU数据：使用插值获取
+             * 注意这个IMU的时间可以比前一帧大，也可以小
+             */
             acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
                     (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tini/tab))*0.5f;
             // 计算过程类似加速度
@@ -1849,6 +1864,7 @@ void Tracking::PreintegrateIMU()
         else if(i<(n-1))
         {
             // 中间的数据不存在帧的干扰，正常计算
+            // 使用的是中间值来作为两个IMU数据之间的不变量
             acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a)*0.5f;
             angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w)*0.5f;
             tstep = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
@@ -1856,6 +1872,8 @@ void Tracking::PreintegrateIMU()
         // 直到倒数第二个imu时刻时，计算过程跟第一时刻类似，都需要考虑帧与imu时刻的关系
         else if((i>0) && (i==(n-1)))
         {
+            // const int n = mvImuFromLastFrame.size()-1;  // 注意这里减了1
+            // 最后一个IMU数据也并不一定对应着当前帧，注意这个IMU的时间可以比当前帧大，也可以小
             float tab = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
             float tend = mvImuFromLastFrame[i+1].t-mCurrentFrame.mTimeStamp;
             acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
@@ -1867,6 +1885,8 @@ void Tracking::PreintegrateIMU()
          // 就两个数据时使用第一个时刻的，这种情况应该没有吧，，回头应该试试看
         else if((i==0) && (i==(n-1)))
         {
+            // 此处最好也进行插值操作，而不是直接使用，因为这个时间间隔第一个IMU的数据
+            // 可以分别对第一个和最后一个进行插值计算，然后计算平均值作为这段时间的IMU数据
             acc = mvImuFromLastFrame[i].a;
             angVel = mvImuFromLastFrame[i].w;
             tstep = mCurrentFrame.mTimeStamp-mCurrentFrame.mpPrevFrame->mTimeStamp;
@@ -1875,6 +1895,10 @@ void Tracking::PreintegrateIMU()
         // 应该是必存在的吧，一个是相对上一关键帧，一个是相对上一帧
         if (!mpImuPreintegratedFromLastKF)
             cout << "mpImuPreintegratedFromLastKF does not exist" << endl;
+        /**
+         * notes:
+         *      1. 注意查看mpImuPreintegratedFromLastKF和pImuPreintegratedFromLastFrame零偏
+         */
         mpImuPreintegratedFromLastKF->IntegrateNewMeasurement(acc,angVel,tstep);
         pImuPreintegratedFromLastFrame->IntegrateNewMeasurement(acc,angVel,tstep);
     }

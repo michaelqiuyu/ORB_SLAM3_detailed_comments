@@ -661,10 +661,6 @@ namespace ORB_SLAM3
             Eigen::Vector3f p3Dw = pMP->GetWorldPos();
 
             // Transform into Camera Coords.
-            /**
-             * notes:
-             *      1.
-             */
             Eigen::Vector3f p3Dc = Tcw * p3Dw;
 
             // Depth must be positive
