@@ -129,10 +129,11 @@ ImuCamPose::ImuCamPose(Frame *pF):its(0)
 
 /** 
  * @brief 储存位姿相关的信息，用于优化
+ * notes：用于位姿图优化
  */
 ImuCamPose::ImuCamPose(Eigen::Matrix3d &_Rwc, Eigen::Vector3d &_twc, KeyFrame* pKF): its(0)
 {
-    // notes: 使用的是传入的R，t，而不是pKF的位姿
+    // notes: 使用的是传入的R，t，而不是pKF的位姿，pKF仅提供视觉与IMU的标定关系
     // This is only for posegrpah, we do not care about multicamera
     tcw.resize(1);
     Rcw.resize(1);
@@ -160,6 +161,7 @@ ImuCamPose::ImuCamPose(Eigen::Matrix3d &_Rwc, Eigen::Vector3d &_twc, KeyFrame* p
 
 /** 
  * @brief 设置相关数据
+ * notes: 从VertexPose::read中读取相关信息，然后设置参数
  */
 void ImuCamPose::SetParam(
     const std::vector<Eigen::Matrix3d> &_Rcw, const std::vector<Eigen::Vector3d> &_tcw,
@@ -228,8 +230,8 @@ void ImuCamPose::Update(const double *pu)
     ut << pu[3], pu[4], pu[5];
 
     // Update body pose
-    // 查看邱晓晨的文档
-    twb += Rwb * ut;
+    // notes: 查看邱晓晨的文档，从此处可以看出，优化中时机优化的是IMU的位姿
+    twb += Rwb * ut;  // 注意先更新平移，再更新旋转，这是因为平移求导的定义使用了更新前的旋转
     Rwb = Rwb * ExpSO3(ur);
 
     // Normalize rotation after 5 updates
@@ -341,7 +343,7 @@ bool VertexPose::read(std::istream& is)
 
     double bf;
     is >> bf;
-    _estimate.SetParam(Rcw,tcw,Rbc,tbc,bf);
+    _estimate. SetParam(Rcw,tcw,Rbc,tbc,bf);
     updateCache();
     
     return true;
@@ -409,9 +411,10 @@ void EdgeMono::linearizeOplus()
      * notes:
      *      1. 优化的是Rbw，因此投影过程为K * Tcb * Tbw * Pw
      *      2. 令p1 = Tcb * Tbw * Pw = Tcw * Pw
-     *      3. 令p2 = Tbw * Pw
+     *      3. 令p2 = Tbw * Pw；实际上就是Xb
      *      4. 根据链式求导即可得到下面的结果
      */
+     // 注意这里的proj_jac与SALM14讲上相差一个负号，这也是_jacobianOplusXi = -proj_jac * Rcw;中-proj_jac的原因
     const Eigen::Matrix<double,2,3> proj_jac = VPose->estimate().pCamera[cam_idx]->projectJac(Xc);
     _jacobianOplusXi = -proj_jac * Rcw;
 
@@ -420,6 +423,20 @@ void EdgeMono::linearizeOplus()
     double y = Xb(1);
     double z = Xb(2);
 
+    /**
+     * notes：
+     *      1. 注意此处使用的顶点是VertexPose，而不是VertexSE3Expmap；因此，此处的求解并没有使用SE3，这尤其重要
+     *      2. 在optimizableTypes.cpp中的EdgeSE3ProjectXYZOnlyPose::linearizeOplus中，_jacobianOplusXi = -pCamera->projectJac(xyz_trans) * SE3deriv;
+     *      3. 而此处_jacobianOplusXj = proj_jac * Rcb * SE3deriv，并且两者的SE3deriv完全相同，但是一个proj_jac前面有负号，一个没有
+     *      4. 这愈加说明了，这里的计算是严谨的，而不是基于SE3推导直接copy的
+     *      5. 实际上，这里只需要讨论p2 = Tbw * Pw中p2对旋转Rwb和平移twb的导数；变形p2 = Rwb.t() * (pw - twb)
+     *      6. 对Rwb执行右扰动，(Rwb * exp(△fai)).t() * (pw - twb) - Rwb.t() * (pw - twb) = (Rwb.t() * (pw - twb)).hat * △fai;
+     *          故，对Rwb的导数为：(Rwb.t() * (pw - twb)).hat = p2.hat
+     *      7. 对twb求导，p2 = Rwb.t() * pw - Rwb.t() * twb，有Rwb.t() * pw - Rwb.t() * (Rwb * △t + twb) - (Rwb.t() * pw - Rwb.t() * twb)
+     *          = -△t，对twb的导数为：-I
+     *      8. 因此，整体求解的表达式为-SE3deriv
+     *      9. 所以，最终的求解表达式为：-proj_jac * Rcb * -SE3deriv = proj_jac * Rcb * SE3deriv
+     */
     SE3deriv <<  0.0,   z,  -y, 1.0, 0.0, 0.0,
                  -z , 0.0,   x, 0.0, 1.0, 0.0,
                   y ,  -x, 0.0, 0.0, 0.0, 1.0;
@@ -744,6 +761,14 @@ void EdgeInertialGS::computeError()
     const IMU::Bias b(VA->estimate()[0],VA->estimate()[1],VA->estimate()[2],VG->estimate()[0],VG->estimate()[1],VG->estimate()[2]);
     g = VGDir->estimate().Rwg*gI;
     const double s = VS->estimate();
+    /**
+     * 以下三个量是基于IMU预积分获取的
+     *      1. dR = Ri.t() * Rj = Rbi_g * Rg_bj = Rbi_bj = Rbi_w * Rw_bj
+     *      2. dV = Ri.t() * (Vj - Vi - g * △t) = Ri.t() * Rwg.t() * Rwg * (Vj - Vi - g * △t) = Ri' * (sVj - sVi - Rwg * g * △t)
+     *      3. dP = Ri.t() * (Pj - Pi - Vi * △t - 0.5 * g * △t^2) = Ri.t() * Rwg.t() * Rwg * (Pj - Pi - Vi * △t - 0.5 * g * △t^2) = Ri' * (sPj - sPi -sVi * △t - 0.5 * Rwg * g * △t^2)
+     * 此处能够执行的原因是，dR、dV和dP都是基于body_i和body_j的，与IMU原始的世界系已经无关了，从而上推导也可以知道，我们可以使用任意的世界系，只需要做相应的变换即可
+     */
+
     const Eigen::Matrix3d dR = mpInt->GetDeltaRotation(b).cast<double>();
     const Eigen::Vector3d dV = mpInt->GetDeltaVelocity(b).cast<double>();
     const Eigen::Vector3d dP = mpInt->GetDeltaPosition(b).cast<double>();
@@ -752,6 +777,12 @@ void EdgeInertialGS::computeError()
     // dR.transpose() 为imu预积分的值，VP1->estimate().Rwb.transpose() * VP2->estimate().Rwb 为相机的Rwc在乘上相机与imu的标定外参矩阵
     const Eigen::Vector3d er = LogSO3(dR.transpose()*VP1->estimate().Rwb.transpose()*VP2->estimate().Rwb);
     const Eigen::Vector3d ev = VP1->estimate().Rwb.transpose()*(s*(VV2->estimate() - VV1->estimate()) - g*dt) - dV;
+    /**
+     * notes：
+     *      1. 此处的twb = Rwc * tcb + twc，tcb有真实尺度，twc1没有真是尺度，导致twb的尺度是模糊的
+     *      2. 但是如果假设Rwc1近似等于Rwc2，那么twb2 - twb1 = twc2 - twc1，是没有尺度的，正好使用尺度s
+     *      3. 其实此处可以使用正确的表达式，而不是近似表达，也就是将twb = Rwc * tcb + twc1带入其中，当然，对速度的求解也是一样的；当然，相应公式也要重新推导
+     */
     const Eigen::Vector3d ep = VP1->estimate().Rwb.transpose()*(s*(VP2->estimate().twb - VP1->estimate().twb - VV1->estimate()*dt) - g*dt*dt/2) - dP;
 
     _error << er, ev, ep;
@@ -761,6 +792,12 @@ void EdgeInertialGS::computeError()
 // 对重力和尺度方面的导数参考Inertial-Only ptimizatin for Visual-Inertial Initialization的公式6-11
 void EdgeInertialGS::linearizeOplus()
 {
+    /**
+     * notes:
+     *      1. 这里不再是邱笑晨文档上的预积分了，而是基于EdgeInertialGS::computeError中构建的预积分项
+     *      2. 需要根据新的预积分项做相应修改；比如从对Rgb→Rwg等
+     *      3. 这里是新的预积分项误差er, ev, ep对VP1、VV1、VG、VA、VP2、VV2、VGDIR、VS
+     */
     const VertexPose* VP1 = static_cast<const VertexPose*>(_vertices[0]);
     const VertexVelocity* VV1= static_cast<const VertexVelocity*>(_vertices[1]);
     const VertexGyroBias* VG= static_cast<const VertexGyroBias*>(_vertices[2]);
@@ -772,6 +809,14 @@ void EdgeInertialGS::linearizeOplus()
     // 1. 获取偏置的该变量，因为要对这个东西求导
     const IMU::Bias b(VA->estimate()[0],VA->estimate()[1],VA->estimate()[2],VG->estimate()[0],VG->estimate()[1],VG->estimate()[2]);
     const IMU::Bias db = mpInt->GetDeltaBias(b);
+    /**
+     * notes:
+     *      1. 需要注意的是dR、dV和dP在EdgeInertialGS::computeError变换了计算方法，但是前后是“取等”的
+     *      2. 对ev = VP1->estimate().Rwb.transpose()*(s*(VV2->estimate() - VV1->estimate()) - g*dt) - dV而言，对零偏的导数由dV提供
+     *      3. 而dV对零偏的导数实际上是根据dV(b') = dV(b) + JV(b) * △b，也就是邱晓晨文档的方法计算的，与dV采取何种形式无关，而只与dV = ∑(△Rik(bg) * (fk - ba) * △t)有关
+     *      4. △Rik与世界系无关，表示的是body系的相对关系，fk和ba也都是body系的变量，因此dV与世界系的选择无关
+     *      5. 同理dR和dP对零偏的导数与世界系的选择无关，仍然是原表达式，不用做更改
+     */
 
     // 陀螺仪的偏置改变量
     Eigen::Vector3d dbg;
@@ -846,7 +891,7 @@ void EdgeInertialGS::linearizeOplus()
      * 1. 首先先计算3*3的雅克比矩阵，然后去掉最后一列即可
      * 2. 对于B = A*P而言，去掉B的最后一列也就是去掉P的最后一列，这也是GM矩阵的由来
      */
-    _jacobianOplus[6].block<3,2>(3,0) = -Rbw1*dGdTheta*dt;
+    _jacobianOplus[6].block<3,2>(3,0) = -Rbw1*dGdTheta*dt;  // 注意这里有个负号，所以GM矩阵的形式可能与自己推导的不一样
     _jacobianOplus[6].block<3,2>(6,0) = -0.5*Rbw1*dGdTheta*dt*dt;
 
     // Jacobians wrt scale factor
@@ -969,16 +1014,23 @@ Eigen::Vector3d LogSO3(const Eigen::Matrix3d &R)
 {
     const double tr = R(0,0)+R(1,1)+R(2,2);
     Eigen::Vector3d w;
+    // 实际上表示(R - R.t()).hat / 2；而n = (R - R.t()).hat / (2 * sin(theta))
     w << (R(2,1)-R(1,2))/2, (R(0,2)-R(2,0))/2, (R(1,0)-R(0,1))/2;
     const double costheta = (tr-1.0)*0.5f;
-    // xc's todo: 这里costheta < -1的时候直接取w的理由是什么？
+    // R = cos(theta) * I + (1 - cos(theta)) * n * n.t() + sin(theta) * n^
     if(costheta>1 || costheta<-1)
+        /**
+         * cos(theta) = 1 → R = I → R为对称矩阵 → w = 0
+         * cos(theta) = -1 → R = I + 2 * n * n.t() → R为对称矩阵 → w = 0
+         */
         return w;
     const double theta = acos(costheta);
     const double s = sin(theta);
     if(fabs(s)<1e-5)
+        // sin(theta) = 0 → cos(theta) = +-1 → 同上，w = 0
         return w;
     else
+        // 标准公式计算
         return theta*w/s;
 }
 

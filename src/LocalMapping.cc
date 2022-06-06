@@ -167,7 +167,7 @@ void LocalMapping::Run()
             // 已经处理完队列中的最后的一个关键帧，并且闭环检测没有请求停止LocalMapping
             if(!CheckNewKeyFrames() && !stopRequested())
             {
-                // 当前地图中关键帧数目大于2个
+                // 当前地图中关键帧数目大于2个，初始化之后又新建了关键帧
                 if(mpAtlas->KeyFramesInMap()>2)
                 {
                     // Step 6.1 处于IMU模式并且当前关键帧所在的地图已经完成IMU初始化
@@ -257,7 +257,7 @@ void LocalMapping::Run()
                 vdKFCulling_ms.push_back(timeKFCulling_ms);
 #endif
                 // Step 9 如果距离IMU第一阶段初始化成功累计时间差小于100s，进行VIBA
-                if ((mTinit<50.0f) && mbInertial)
+                if ((mTinit<100.0f) && mbInertial)
                 {
                     // Step 9.1 根据条件判断是否进行VIBA1（IMU第二阶段初始化）
                     // 条件：1、当前关键帧所在的地图还未完成IMU初始化---并且--------2、正常跟踪状态----------
@@ -1608,6 +1608,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
              *      1. 初始化时关于速度的预积分定义△Vij = Ri.t()*(s*Vj - s*Vi - Rwg*g*tij)→ Ri * △Vij = sVj - sVi - Rwg * g * tij
              *      2. ∑Ri * △Vij = sVn - Rwg * g * △t
              *      3. 忽略sVn的影响
+             *      4. GetImuRotation获取的是根据相机位姿和相机与IMU的外参计算得到的
              */
             dirG -= (*itKF)->mPrevKF->GetImuRotation() * (*itKF)->mpImuPreintegrated->GetUpdatedDeltaVelocity();
             // 求取实际的速度，位移/时间
@@ -1618,9 +1619,10 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
              *      3. 对于单目而言，此时的相机位姿是没有尺度的，但是外参是有尺度的，得到的GetImuPosition却是尺度模糊的，
              *      4. 一部分有尺度，另一部分没有尺度，也就是mOwb = Rwc * tcb + twc，这里tcb是有尺度的，twc是没有尺度的
              *      5. mOwb1 = Rwc1 * tcb + twc1, mOwb2 = Rwc2 * tcb + twc2, 从而mOwb2 - mOwb1 = Rwc2 * tcb - Rwc1 * tcb + twc2 - twc1
-             *      6. 如果假设Rwc1与Rwc2接近的话，倒是可以认为mOwb2 - mOwb1 = twc2 - twc1，是没有尺度的
-             *      7. 总之，这里看成是在第一帧相机系下的速度即可，至于速度的尺度信息后面应该会修正
-             *      8. todo: 检查后面有对速度的尺度进行修正吗？
+             *      6. 如果假设Rwc1与Rwc2接近的话，倒是可以认为mOwb2 - mOwb1 = twc2 - twc1，是没有尺度的；实际上连续两个关键帧的旋转确实比较接近，况且后面会做尺度和重力的refine
+             *      7. 其实可以使用mOwb = Rwc * tcb + twc计算真是的速度，形式为v0 + s * v；对优化来说，照样可以运行，对公式重新推导即可
+             *      8. 总之，这里看成是在第一帧相机系下的速度即可，至于速度的尺度信息后面应该会修正
+             *      9. todo: 检查后面有对速度的尺度进行修正吗？
              */
             Eigen::Vector3f _vel = ((*itKF)->GetImuPosition() - (*itKF)->mPrevKF->GetImuPosition())/(*itKF)->mpImuPreintegrated->dT;
             (*itKF)->SetVelocity(_vel);
@@ -1643,10 +1645,18 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
          *
          * notes:
          *      1. 此处忽略Vn的影响导致求得的R必然是不准确的，而且这种不准确与Vn的大小密切相关；仅能作为初值用于后面对R的精确化求解
-         *      2. 这里需要一定的关键帧的数量和时间间隔，是否也是为了让Vn在dirG中的占比减小？应该是这样
+         *      2. s是一个待求的常数，Vn是速度，不是一个剧烈波动的数，因此sVn是一个稳定的数值，时间越长，n*Rwg*g*t在dirG中所占的比重越大，近似的准确性也就越高，因此，对have_imu_num以及关键帧数量和时间有要求
+         *
+         * todo:
+         *      1. 为什么不这样计算Rwg：
+         *          1.1 根据相机位姿计算速度V1，如Eigen::Vector3f _vel = ((*itKF)->GetImuPosition() - (*itKF)->mPrevKF->GetImuPosition())/(*itKF)->mpImuPreintegrated->dT;
+         *          1.2 根据IMU预积分递推得到对应时刻的速度V2
+         *          1.3 那么上面两个速度分别是在世界系W和g下获得的，据此可以得到Rwg
+         *          1.4 V2实际上不可求，因为IMU递推的初值旋转不可知，因为IMU递推默认世界系g的Z轴为重力反向，因此初始旋转并不是单位阵
+         *          1.5 因此，此处使用相同方法的位姿，也无法获取Rwg
          */
 
-        // dirG = sV1 - sVn + n*Rwg*g*t
+        // dirG = sV1 - sVn + n*Rwg*g*t --- 应该是dirG = -sVn + n*Rwg*g*t
         // 归一化
         dirG = dirG/dirG.norm();
         // 原本的重力方向
@@ -1680,7 +1690,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     mScale=1.0;
 
-    // 暂时没发现在别的地方出现过
+    // 暂时没发现在别的地方出现过；注意并不是mTinit
     mInitTime = mpTracker->mLastFrame.mTimeStamp-vpKF.front()->mTimeStamp;
 
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
@@ -1689,7 +1699,11 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
     // 尺度太小的话初始化认为失败
-    // xc's todo: 为什么尺度很小就是失败的，这里的尺度由什么决定的
+    /**
+     * xc's todo: 为什么尺度很小就是失败的，这里的尺度由什么决定的；
+     *      1. 如果s很小，那么说明单目视觉系统的尺度还要缩小10倍以上，那么用于初始化的视差可能就非常差，视觉SLAM系统会非常糟糕
+     *      2. 但是视觉SLAM又能够正常运行，说明这里的尺度计算是有问题的；问题可能来自于初值选择的不好，陷入局部最优了
+     */
     if (mScale<1e-1)
     {
         cout << "scale too small" << endl;
@@ -1703,9 +1717,11 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     {
         unique_lock<mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
         // 尺度变化超过设定值，或者非单目时（无论带不带imu，但这个函数只在带imu时才执行，所以这个可以理解为双目imu）
+        // 第一个条件可以认为是单目但会触发，因为只有单目才会优化尺度；后一个条件是非单目
         if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {  // 非单目需要虽说不需要变换尺度，但是需要变换坐标系到原始重力坐标系
             // 4.1 恢复重力方向与尺度信息
             // xc's todo: map的世界系是原始重力的世界系吗？答案是是的，因此后面才会直接将重力方向设置为(0, 0, -1)
+            // 注意：世界系只有旋转，没有平移；并注意这里的mRwg加了转置，因此这里最好命名为Tgw
             Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
             mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
             // 4.2 更新普通帧的位姿，主要是当前帧与上一帧
@@ -1744,9 +1760,9 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     {
         // 5. 承接上一步纯imu优化，按照之前的结果更新了尺度信息及适应重力方向，所以要结合地图进行一次视觉加imu的全局优化，这次带了MP等信息
         // 1.0版本里面不直接赋值了，而是将所有优化后的信息保存到变量里面
-        if (priorA!=0.f)
+        if (priorA!=0.f)  // 第一、第二阶段初始化
             Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, true, priorG, priorA);
-        else
+        else  // 第三阶段初始化
             Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, false);
     }
 
@@ -1800,7 +1816,8 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
                 pChild->mTcwGBA = Tchildc * pKF->mTcwGBA;
 
                 // 7.4 使用相同手段更新速度
-                Sophus::SO3f Rcor = pChild->mTcwGBA.so3().inverse() * pChild->GetPose().so3();  // 旧世界系到新世界系
+                // 旧世界系到新世界系
+                Sophus::SO3f Rcor = pChild->mTcwGBA.so3().inverse() * pChild->GetPose().so3();
                 if(pChild->isVelocitySet()){
                     // v→Rw`b * Rbw * v = Rw`c * Rcw * v
                     pChild->mVwbGBA = Rcor * pChild->GetVelocity();
@@ -1809,6 +1826,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
                     Verbose::PrintMess("Child velocity empty!! ", Verbose::VERBOSITY_NORMAL);
                 }
 
+                // !!!bug: pChild->mBiasGBA = pKF->GetImuBias()
                 pChild->mBiasGBA = pChild->GetImuBias();
                 pChild->mnBAGlobalForKF = GBAid;
 

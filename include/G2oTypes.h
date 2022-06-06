@@ -79,19 +79,21 @@ public:
     ImuCamPose() {}
     ImuCamPose(KeyFrame *pKF);
     ImuCamPose(Frame *pF);
+    // 用于位姿图优化
     ImuCamPose(Eigen::Matrix3d &_Rwc, Eigen::Vector3d &_twc, KeyFrame *pKF);
 
     void SetParam(const std::vector<Eigen::Matrix3d> &_Rcw, const std::vector<Eigen::Vector3d> &_tcw, const std::vector<Eigen::Matrix3d> &_Rbc,
                     const std::vector<Eigen::Vector3d> &_tbc, const double &_bf);
 
     void Update(const double *pu);                                                   // update in the imu reference
+    // 用于位姿图优化
     void UpdateW(const double *pu);                                                  // update in the world reference
     Eigen::Vector2d Project(const Eigen::Vector3d &Xw, int cam_idx = 0) const;       // Mono
     Eigen::Vector3d ProjectStereo(const Eigen::Vector3d &Xw, int cam_idx = 0) const; // Stereo
     bool isDepthPositive(const Eigen::Vector3d &Xw, int cam_idx = 0) const;
 
 public:
-    // For IMU
+    // For IMU：优化的状态量
     Eigen::Matrix3d Rwb;
     Eigen::Vector3d twb;
 
@@ -129,7 +131,7 @@ public:
 };
 
 // Optimizable parameters are IMU pose
-// 优化中关于位姿的节点，6自由度
+// notes: 优化IMU的位姿，6自由度
 class VertexPose : public g2o::BaseVertex<6, ImuCamPose>
 {
 public:
@@ -155,7 +157,7 @@ public:
     virtual void oplusImpl(const double *update_)
     {
         // https://github.com/RainerKuemmerle/g2o/blob/master/doc/README_IF_IT_WAS_WORKING_AND_IT_DOES_NOT.txt
-        // 官方讲解cache
+        // 官方讲解updateCache
         // 需要在oplusImpl与setEstimate函数中添加
         _estimate.Update(update_);
         updateCache();
@@ -235,6 +237,12 @@ public:
 
 /** 
  * @brief 陀螺仪偏置节点
+ * notes:
+ *      1. 表面上直接优化的零偏，而不是邱笑晨文档中的零偏的增量
+ *      2. 但是实质上又是优化的零偏的增量，因为优化过程中对零偏的导数一直没变，如一直使用的JVg，并没有随着零偏的变化而变化，也就是以某一个值为基准求解增量了
+ *      3. 只有在IMU的初始化过程中，才有可能执行IMU的重新预积分，这取决于零偏变化的幅度；之后，就不会执行重新预积分了，认为后面零偏的波动很小
+ *      4. 零偏的变化，会导致IMU预积分的变化，预积分对各状态量（包括零偏）的导数也可能会发生变化
+ *      5. 在边对状态量的求解过程中，并没有改变JRg、JVg和JVa等的值（某些导数的式子里面含有这些项）
  */
 class VertexGyroBias : public g2o::BaseVertex<3, Eigen::Vector3d>
 {
@@ -261,6 +269,12 @@ public:
 
 /** 
  * @brief 加速度计偏置节点
+ * notes:
+ *      1. 直接优化的零偏，而不是邱笑晨文档中的零偏的增量
+ *      2. 但是实质上又是优化的零偏的增量，因为优化过程中对零偏的导数一直没变，如一直使用的JVg，并没有随着零偏的变化而变化
+ *      3. 只有在IMU的初始化过程中，才有可能执行IMU的重新预积分，这取决于零偏变化的幅度；之后，就不会执行重新预积分了，认为后面零偏的波动很小
+ *      4. 零偏的变化，会导致IMU预积分的变化，预积分对各状态量（包括零偏）的导数也可能会发生变化
+ *      5. 在边对状态量的求解过程中，并没有改变JRg、JVg和JVa等的值（某些导数的式子里面含有这些项）
  */
 class VertexAccBias : public g2o::BaseVertex<3, Eigen::Vector3d>
 {
@@ -302,7 +316,6 @@ public:
 
     void Update(const double *pu)
     {
-        // xc's todo: 查看重力的建模方式，才能明白这里为什么仅使用前两个维度来进行更新操作
         Rwg = Rwg * ExpSO3(pu[0], pu[1], 0.0);
     }
 
@@ -314,8 +327,6 @@ public:
 /** 
  * @brief 重力方向节点
  */
-
-// xc's todo: 查看重力的建模方式，明确这里的自由度为什么是2
 class VertexGDir : public g2o::BaseVertex<2, GDirection>
 {
 public:
@@ -369,7 +380,7 @@ public:
 
     virtual void oplusImpl(const double *update_)
     {
-        // xc's todo: 查看尺度的建模方式，才能明白这里的更新方式是为什么？
+        // notes: 使用的是又扰动的方式更新尺度，这样做的好处在于，可以保证更新后的尺度一定是正值
         setEstimate(estimate() * exp(*update_));
     }
 };
@@ -450,6 +461,7 @@ public:
     }
 
     // 由2*2的像素点信息矩阵变成了9*9的关于旋转平移与三维点坐标的信息矩阵
+    // xc's todo: 这样做的理由是什么，有什么用处
     Eigen::Matrix<double, 9, 9> GetHessian()
     {
         linearizeOplus();

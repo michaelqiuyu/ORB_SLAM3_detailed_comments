@@ -114,7 +114,8 @@ cv::Point3f Pinhole::unproject(const cv::Point2f &p2D)
 /** 
  * @brief 求解二维像素坐标关于三维点坐标的雅克比矩阵
  * @param v3D 三维点
- * @return 
+ * @return
+ * notes: 注意这里与SLAM14讲相差一个负号
  */
 Eigen::Matrix<double, 2, 3> Pinhole::projectJac(const Eigen::Vector3d &v3D)
 {

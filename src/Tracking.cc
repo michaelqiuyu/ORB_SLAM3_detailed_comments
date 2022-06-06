@@ -1824,7 +1824,7 @@ void Tracking::PreintegrateIMU()
         return;
     }
 
-    // 构造imu预处理器,并初始化标定数据
+    // 构造imu预处理器,并初始化标定数据：利用上一帧的零偏信息
     IMU::Preintegrated* pImuPreintegratedFromLastFrame = new IMU::Preintegrated(mLastFrame.mImuBias,mCurrentFrame.mImuCalib);
     // 针对预积分位置的不同做不同中值积分的处理
     /**
@@ -1908,6 +1908,7 @@ void Tracking::PreintegrateIMU()
     mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
     mCurrentFrame.mpLastKeyFrame = mpLastKeyFrame;
 
+    // 当前帧预积分结束
     mCurrentFrame.setIntegrated();
 
     //Verbose::PrintMess("Preintegration is finished!! ", Verbose::VERBOSITY_DEBUG);
@@ -4852,6 +4853,7 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
         if(pKF->GetMap() == pMap)
         {
             // 恢复普通帧的尺度，这里的相对位姿是track里面获得的，在没有根据IMU计算尺度之前也是没有尺度的
+            // mlRelativeFramePoses保存的形式是Tcr
             (*lit).translation() *= s;
         }
     }
@@ -4887,6 +4889,7 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
         /**
          * 这里的做法可能跟逻辑稍微有一些不同，从逻辑上讲，一般直接根据pi等去计算pj，但是这里实际上是根据预计分量△pij去计算pj的
          * 因此需要对预积分公式做一些变形，获得pj关于预计分量的式子
+         * mpImuPreintegrated表示从上一个关键帧开始预积分计算
          *
          * 由于使用了SetNewBias，因此这里使用GetUpdatedDeltaRotation等方法
          */

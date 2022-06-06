@@ -298,6 +298,7 @@ void Map::ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool b
          *      2. 尺度s直接乘以平移恢复了平移的尺度了
          */
         KeyFrame *pKF = *sit;
+        // 使用Twc而不是Tcw的原因是，前面的计算中使用的都是基于相机在世界系的位置，也就是Twc；其实，直接使用Tcw.translation()更新尺度也是一样的
         Sophus::SE3f Twc = pKF->GetPoseInverse();
         Twc.translation() *= s;
 
@@ -314,6 +315,7 @@ void Map::ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool b
          *      2. 因此这里不是简单在Vw上乘以一个s就行了，而应该按照mOwb2 - mOwb1 = Rwc2 * tcb - Rwc1 * tcb + s * twc2 - s * twc1来进行重新计算
          *      3. 如果按照下面的方式进行计算，实际的结果为mOwb2 - mOwb1 = s * (Rwc2 * tcb - Rwc1 * tcb + twc2 - twc1)，也就是将有尺度的tcb也进行了缩放，这是不对的
          *      4. 代码之所以能运行的原因，我猜想是因为Rwc1与Rwc2非常接近，也就是连续的两个关键帧的位姿基本相同，所以才没有多大的误差产生
+         *      5. 在IMU初始化之中已经论述了这样做对对速度和位姿的影响了
          */
         Eigen::Vector3f Vw = pKF->GetVelocity();
         if (!bScaledVel)

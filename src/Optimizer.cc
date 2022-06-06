@@ -397,7 +397,12 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
 void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const long unsigned int nLoopId, bool *pbStopFlag, bool bInit, float priorG, float priorA, Eigen::VectorXd *vSingVal, bool *bHess)
 {
     /**
-     * bInit: 默认值为false；IMU第二阶段初始化为true；IMU第三阶段初始化为fasle
+     * localmap:
+     *      bInit: 默认值为false；IMU第一、第二阶段初始化为true；IMU第三阶段初始化为fasle
+     *      默认priorG = 1e2, priorA=1e6
+     *      pbStopFlag为NULL
+     *      bFixLocal = false
+     *
      */
     long unsigned int maxKFid = pMap->GetMaxKFid();
     const vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
@@ -462,7 +467,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         }
     }
 
-    if (bInit)  // 与上面!bInit添加不同；IMU第二阶段初始化时添加
+    if (bInit)  // 与上面!bInit添加不同；IMU第一、第二阶段初始化时添加
     {
         // 这个时候只有只有一个偏置节点
         VertexGyroBias* VG = new VertexGyroBias(pIncKF);
@@ -505,6 +510,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                 continue;
             if(pKFi->bImu && pKFi->mPrevKF->bImu)
             {
+                // 这里先使用前一关键帧的零偏更新当前关键帧的零偏
                 pKFi->mpImuPreintegrated->SetNewBias(pKFi->mPrevKF->GetImuBias());
                 g2o::HyperGraph::Vertex* VP1 = optimizer.vertex(pKFi->mPrevKF->mnId);
                 g2o::HyperGraph::Vertex* VV1 = optimizer.vertex(maxKFid+3*(pKFi->mPrevKF->mnId)+1);
@@ -513,14 +519,14 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                 g2o::HyperGraph::Vertex* VA1;
                 g2o::HyperGraph::Vertex* VG2;
                 g2o::HyperGraph::Vertex* VA2;
-                if (!bInit)  // IMU第三阶段初始化
+                if (!bInit)  // IMU第三阶段初始化，此处优化的是不同的零偏
                 {
                     VG1 = optimizer.vertex(maxKFid+3*(pKFi->mPrevKF->mnId)+2);
                     VA1 = optimizer.vertex(maxKFid+3*(pKFi->mPrevKF->mnId)+3);
                     VG2 = optimizer.vertex(maxKFid+3*(pKFi->mnId)+2);
                     VA2 = optimizer.vertex(maxKFid+3*(pKFi->mnId)+3);
                 }
-                else  // IMU第二阶段初始化，对于不同的关键帧，使用相同的陀螺仪和加速度零偏顶点
+                else  // IMU第二阶段初始化，对于不同的关键帧，使用相同的陀螺仪和加速度零偏顶点，注意优化的都是同一个零偏
                 {
                     VG1 = optimizer.vertex(4*maxKFid+2);
                     VA1 = optimizer.vertex(4*maxKFid+3);
@@ -564,6 +570,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
                 if (!bInit)  // IMU第三阶段初始化
                 {
+                    // 添加前后两个关键帧的零偏应该接近的约束
                     EdgeGyroRW* egr= new EdgeGyroRW();
                     egr->setVertex(0,VG1);
                     egr->setVertex(1,VG2);
@@ -586,7 +593,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         }
     }
 
-    if (bInit)  // IMU第二阶段初始化
+    if (bInit)  // IMU第一、第二阶段初始化
     {
         g2o::HyperGraph::Vertex* VG = optimizer.vertex(4*maxKFid+2);
         g2o::HyperGraph::Vertex* VA = optimizer.vertex(4*maxKFid+3);
@@ -670,6 +677,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                     optimizer.addEdge(e);
                 }
                 // 在两个相机的模式下，mvuRight中存储的都是-1，因此不会触发这个判断，而是会进行下面的判断，这个时候也就是1个世界点到两个相机的重投影误差（两个二维残差），而不是双目模式下的一个三维残差
+                // 此时是左右目的模式
                 else if(leftIndex != -1 && pKFi->mvuRight[leftIndex] >= 0) // stereo observation
                 {
                     kpUn = pKFi->mvKeysUn[leftIndex];
@@ -708,7 +716,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                         kpUn = pKFi->mvKeysRight[rightIndex];
                         obs << kpUn.pt.x, kpUn.pt.y;
 
-                        EdgeMono *e = new EdgeMono(1);
+                        EdgeMono *e = new EdgeMono(1);  // 明确了相机
 
                         g2o::OptimizableGraph::Vertex* VP = dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId));
                         if(bAllFixed)
@@ -757,13 +765,13 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         VertexPose* VP = static_cast<VertexPose*>(optimizer.vertex(pKFi->mnId));
         if(nLoopId==0)
         {
-            // 非回环调用
+            // 回环调用
             Sophus::SE3f Tcw(VP->estimate().Rcw[0].cast<float>(), VP->estimate().tcw[0].cast<float>());
             pKFi->SetPose(Tcw);
         }
         else
         {
-            // 并不直接写入，而是通过中间变量保存优化后的结果
+            // 并不直接写入，而是通过中间变量保存优化后的结果，后续更新使用
             pKFi->mTcwGBA = Sophus::SE3f(VP->estimate().Rcw[0].cast<float>(),VP->estimate().tcw[0].cast<float>());
             pKFi->mnBAGlobalForKF = nLoopId;
 
@@ -818,6 +826,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
         if(nLoopId==0)
         {
+            // 回环使用
             pMP->SetWorldPos(vPoint->estimate().cast<float>());
             pMP->UpdateNormalAndDepth();
         }
@@ -3177,6 +3186,7 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
     g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
 
     if (priorG!=0.f)
+        // lambda越大，越倾向于梯度下降算法；反之，越倾向于高斯牛顿算法
         solver->setUserLambdaInit(1e3);
 
     optimizer.setAlgorithm(solver);
@@ -3275,7 +3285,6 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
             if(!VP1 || !VV1 || !VG || !VA || !VP2 || !VV2 || !VGDir || !VS)
             {
                 cout << "Error" << VP1 << ", "<< VV1 << ", "<< VG << ", "<< VA << ", " << VP2 << ", " << VV2 <<  ", "<< VGDir << ", "<< VS <<endl;
-
                 continue;
             }
             EdgeInertialGS* ei = new EdgeInertialGS(pKFi->mpImuPreintegrated);
@@ -3331,6 +3340,13 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
         Eigen::Vector3d Vw = VV->estimate(); // Velocity is scaled after
         pKFi->SetVelocity(Vw.cast<float>());
 
+        /**
+         * notes:
+         *      1. 无论如何都会更新零偏
+         *      2. 只有在零偏变化比较大的时候才会重新预积分，零偏变化大，预计分量也会变化，预积分对状态量的导数也会变化
+         *      3. 因此，此时需要重新预积分，更新预积分量（其通过一阶泰勒展开，重新计算的必要性其实不大）以及预计分量对各状态量的导数（如JVg）
+         *      4. 除了在初始化阶段外，一般是不会重新预积分的，因为那样计算量巨大，也丢失了构建预积分量的优势
+         */
         if ((pKFi->GetGyroBias() - bg.cast<float>()).norm() > 0.01)
         {
             pKFi->SetNewBias(b);
