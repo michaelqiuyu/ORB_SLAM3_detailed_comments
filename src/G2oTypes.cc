@@ -255,6 +255,7 @@ void ImuCamPose::Update(const double *pu)
 }
 
 // 更新世界坐标系
+// xc's todo: 后续查看这个函数是如何使用的，也就是详细查看本质图优化的过程
 void ImuCamPose::UpdateW(const double *pu)
 {
     Eigen::Vector3d ur, ut;
@@ -464,6 +465,7 @@ void EdgeMonoOnlyPose::linearizeOplus()
     double x = Xb(0);
     double y = Xb(1);
     double z = Xb(2);
+    // 这里的计算与EdgeMono::linearizeOplus类似
     SE3deriv << 0.0,   z,   -y, 1.0, 0.0, 0.0,
                 -z , 0.0,    x, 0.0, 1.0, 0.0,
                  y , - x,  0.0, 0.0, 0.0, 1.0;
@@ -504,6 +506,7 @@ void EdgeStereo::linearizeOplus()
     double y = Xb(1);
     double z = Xb(2);
 
+    // 这里的计算与EdgeMono::linearizeOplus类似
     SE3deriv << 0.0, z,   -y, 1.0, 0.0, 0.0,
             -z , 0.0, x, 0.0, 1.0, 0.0,
             y ,  -x , 0.0, 0.0, 0.0, 1.0;
@@ -536,6 +539,8 @@ void EdgeStereoOnlyPose::linearizeOplus()
     double x = Xb(0);
     double y = Xb(1);
     double z = Xb(2);
+
+    // 这里的计算与EdgeMono::linearizeOplus类似
     SE3deriv << 0.0, z,   -y, 1.0, 0.0, 0.0,
             -z , 0.0, x, 0.0, 1.0, 0.0,
             y ,  -x , 0.0, 0.0, 0.0, 1.0;
@@ -589,7 +594,7 @@ EdgeInertial::EdgeInertial(IMU::Preintegrated *pInt):JRg(pInt->JRg.cast<double>(
     // This edge links 6 vertices
     // 6元边
     resize(6);
-    // 1. 定义重力
+    // 1. 定义重力：注意使用到这个边的时候，说明已经初始化了
     g << 0, 0, -IMU::GRAVITY_VALUE;
 
     // 2. 读取协方差矩阵的前9*9部分的逆矩阵，该部分表示的是预积分测量噪声的协方差矩阵
@@ -597,10 +602,11 @@ EdgeInertial::EdgeInertial(IMU::Preintegrated *pInt):JRg(pInt->JRg.cast<double>(
      * notes:
      *      1. 这里C.block<9, 9>不一定是非奇异矩阵，因此这里的操作应该修改为对C.block<9, 9>做特征值分解，并利用特征值分解求逆
      *      2. 也就是对A求特征值分解，A = p * diag * p.t→A.inv = p * diag.inv * p，且diag(i) = 0时，令diag.inv(i) = 0，这样做的理由如下
+     *          为了说明这样操作的理由，不妨举一个特殊的例子，info = diag(a1, a2, ..., an)，ai表示方差，如果ai≠0，那么
+     *          J = (e1.t, e2.t, ..., en.t).t，J.t * info * J = ∑ei.t * ei / ai
+     *          ai等于0，也就是方差为0，也就是没有波动，此时不考虑误差项ei.t * ei，因此直接将1/ai令为0即可
      *
-     * 为了说明这样操作的理由，不妨举一个特殊的例子，info = diag(a1, a2, ..., an)，ai表示方差，如果ai≠0，那么
-     * J = (e1.t, e2.t, ..., en.t).t，J.t * info * J = ∑ei.t * ei / ai
-     * ai等于0，也就是方差为0，也就是没有波动，此时不考虑误差项ei.t * ei，因此直接将1/ai令为0即可
+     * 暂时还没有理解g2o里面setInformation的原理，猜想为e.t() * info * e，然后对e进行一阶泰勒展式
      */
     Matrix9d Info = pInt->C.block<9,9>(0,0).cast<double>().inverse();
     // 3. 强制让其成为对角矩阵
@@ -890,16 +896,15 @@ void EdgeInertialGS::linearizeOplus()
     /**
      * 1. 首先先计算3*3的雅克比矩阵，然后去掉最后一列即可
      * 2. 对于B = A*P而言，去掉B的最后一列也就是去掉P的最后一列，这也是GM矩阵的由来
+     * 3. 注意这里有个负号，所以GM矩阵的形式可能与自己推导的不一样，但是最后的结果是一样的
      */
-    _jacobianOplus[6].block<3,2>(3,0) = -Rbw1*dGdTheta*dt;  // 注意这里有个负号，所以GM矩阵的形式可能与自己推导的不一样
+    _jacobianOplus[6].block<3,2>(3,0) = -Rbw1*dGdTheta*dt;
     _jacobianOplus[6].block<3,2>(6,0) = -0.5*Rbw1*dGdTheta*dt*dt;
 
     // Jacobians wrt scale factor
     // _jacobianOplus[3] 9*1矩阵 总体来说就是三个残差分别对尺度求导
-    /**
-     * notes:
-     *      1. 疑似BUG：根据尺度更新的规则，这里的雅克比计算的应该有问题，应该再乘以一个尺度才能跟尺度更新的规则一致
-     */
+
+    // !!!bug: 根据尺度更新的规则，这里的雅克比计算的应该有问题，应该再乘以一个尺度才能跟尺度更新的规则一致
     _jacobianOplus[7].setZero();
     _jacobianOplus[7].block<3,1>(3,0) = Rbw1*(VV2->estimate()-VV1->estimate());
     _jacobianOplus[7].block<3,1>(6,0) = Rbw1*(VP2->estimate().twb-VP1->estimate().twb-VV1->estimate()*dt);
@@ -939,6 +944,7 @@ void EdgePriorPoseImu::computeError()
      *      5. 我们知道当表示为Rbw的时候，IMU中心在世界系的坐标为-Rbw.t * tbw，可以基于IMU中心在世界系的位置来构建残差
      *      6. 但是这里旋转的表示为Rwb，也就没必要这么做了，不然残差的含义就是某个点在两个坐标系下的坐标应该相同，这不太符合常理，一般应该是两个点在同一个坐标系的坐标应该相同
      *      7. 仅讨论此处的话，因为使用了一个固定的Rwb，因此运行起来不会有什么问题，但最好还是去掉Rwb，直接使用e = VP->estimate().twb-twb
+     *      8. 从最小二乘的角度，有e = R * (x - x0) → e.t() * e = (x - x0).t() * (x - x0)
      */
     const Eigen::Vector3d et = Rwb.transpose()*(VP->estimate().twb-twb);
     const Eigen::Vector3d ev = VV->estimate() - vwb;
@@ -973,7 +979,8 @@ void EdgePriorPoseImu::linearizeOplus()
 void EdgePriorAcc::linearizeOplus()
 {
     // Jacobian wrt bias
-    // notes: 疑似BUG：雅克比为-I
+
+    // !!!bug: 雅克比为-I
     _jacobianOplusXi.block<3,3>(0,0) = Eigen::Matrix3d::Identity();
 
 }
@@ -981,7 +988,7 @@ void EdgePriorAcc::linearizeOplus()
 void EdgePriorGyro::linearizeOplus()
 {
     // Jacobian wrt bias
-    // notes: 疑似BUG：雅克比为-I
+    // !!!bug: 雅克比为-I
     _jacobianOplusXi.block<3,3>(0,0) = Eigen::Matrix3d::Identity();
 
 }
