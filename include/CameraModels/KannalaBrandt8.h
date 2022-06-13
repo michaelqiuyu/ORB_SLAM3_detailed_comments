@@ -40,6 +40,7 @@ namespace ORB_SLAM3 {
 
     public:
         KannalaBrandt8() : precision(1e-6) {
+            // 注意这里区别于针孔相机的4个参数，这里还保存了鱼眼相机的畸变系数，在构建Frame的时候，并没有去畸变
             mvParameters.resize(8);
             mnId=nNextId++;
             mnType = CAM_FISHEYE;

@@ -148,6 +148,13 @@ bool Pinhole::ReconstructWithTwoViews(const std::vector<cv::KeyPoint> &vKeys1, c
         tvr = new TwoViewReconstruction(K);
     }
 
+    /**
+     * steps:
+     *      1. 获取匹配
+     *      2. 随机构建最小集进行迭代计算
+     *      3. 几何模型验证：计算F和H，通过假设检验及其否定域的边界值计算得分，从而选择模型
+     *      4. 分解F或者H，计算R和t
+     */
     return tvr->Reconstruct(vKeys1, vKeys2, vMatches12, T21, vP3D, vbTriangulated);
 }
 
@@ -184,6 +191,7 @@ Eigen::Matrix3f Pinhole::toK_()
  * @param unc 特征点2的尺度的平方，1.2^2n，数学意义为假设的方差
  * @return 三维点恢复的成功与否
  */
+// 在特征匹配中去除误匹配的时候使用
 bool Pinhole::epipolarConstrain(
     GeometricCamera *pCamera2, const cv::KeyPoint &kp1, const cv::KeyPoint &kp2,
     const Eigen::Matrix3f &R12, const Eigen::Vector3f &t12, const float sigmaLevel, const float unc)
@@ -235,6 +243,7 @@ std::istream & operator>>(std::istream &is, Pinhole &ph)
 
 bool Pinhole::IsEqual(GeometricCamera *pCam)
 {
+    // 类型、参数的size和数值 都一样
     if (pCam->GetType() != GeometricCamera::CAM_PINHOLE)
         return false;
 

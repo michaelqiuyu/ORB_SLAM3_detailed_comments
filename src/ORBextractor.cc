@@ -1663,7 +1663,8 @@ static void computeDescriptors(const Mat& image, vector<KeyPoint>& keypoints, Ma
 					// 特征点本身直接乘缩放倍数就可以了
                     keypoint->pt *= scale;
                 }
-                // ?TODO vLappingArea 
+                // ?TODO vLappingArea
+                // 如果一次性输入两张图片的内容，我们可以根据序号区分出，那些是第二张图片的特征点，哪些是第一张图片的内容，实际上代码里面并没有使用
                 if(keypoint->pt.x >= vLappingArea[0] && keypoint->pt.x <= vLappingArea[1]){
                     _keypoints.at(stereoIndex) = (*keypoint);
                     desc.row(i).copyTo(descriptors.row(stereoIndex));

@@ -186,7 +186,7 @@ cv::Point3f KannalaBrandt8::unproject(const cv::Point2f &p2D)
     // notes: theta_d >= 0 > -CV_PI一定成立
     // xc's todo: 这里的判断是什么意思，超过了CV_PI / 2的话，theta_d = CV_PI / 2了，这种时候能够直接进行运算吗？
     /**
-     * notes:
+     * !!!bug:
      *      1. 这个地方疑似是个bug，应该是theta = fminf(fmaxf(-CV_PI / 2.f, theta_d), CV_PI / 2.f);目的是给与theta一个比较好的初值，但是theta为入射角，取值范围在0~pi/2
      *      2. 另外如果这么修改的话，就需要将if中国中的float theta = theta_d;删除
      */
@@ -303,6 +303,7 @@ bool KannalaBrandt8::ReconstructWithTwoViews(
     cv::Mat D = (cv::Mat_<float>(4, 1) << mvParameters[4], mvParameters[5], mvParameters[6], mvParameters[7]);
     cv::Mat R = cv::Mat::eye(3, 3, CV_32F);
     cv::Mat K = this->toK();
+    // 在初始化的时候调用这个公式，其他时候并不会直接对所有点去畸变
     cv::fisheye::undistortPoints(vPts1, vPts1, K, D, R, K);
     cv::fisheye::undistortPoints(vPts2, vPts2, K, D, R, K);
 
@@ -333,14 +334,16 @@ Eigen::Matrix3f KannalaBrandt8::toK_()
     return K;
 }
 
+// 在特征匹配中去除误匹配的时候使用
 bool KannalaBrandt8::epipolarConstrain(GeometricCamera *pCamera2, const cv::KeyPoint &kp1, const cv::KeyPoint &kp2,
                                         const Eigen::Matrix3f &R12, const Eigen::Vector3f &t12, const float sigmaLevel, const float unc)
 {
     Eigen::Vector3f p3D;
-    // 实际上没有做极线约束，计算的是射线角度
+    // 实际上没有做极线约束，计算的是两条射线之间的夹角，夹角大于1度，就是有一定的视差，就进行三角化，然后判断深度是否为负；返回值为第一个相机下的深度值
     return this->TriangulateMatches(pCamera2, kp1, kp2, R12, t12, sigmaLevel, unc, p3D) > 0.0001f;
 }
 
+// 与TriangulateMatches的内容基本相同，不同点在于，此函数中使用的是已知世界系下的位姿，而在TriangulateMatches使用的是R12等相对位姿
 bool KannalaBrandt8::matchAndtriangulate(const cv::KeyPoint &kp1, const cv::KeyPoint &kp2, GeometricCamera *pOther,
                                             Sophus::SE3f &Tcw1, Sophus::SE3f &Tcw2,
                                             const float sigmaLevel1, const float sigmaLevel2,
@@ -367,6 +370,7 @@ bool KannalaBrandt8::matchAndtriangulate(const cv::KeyPoint &kp1, const cv::KeyP
     Eigen::Vector3f ray1 = Rwc1 * r1;
     Eigen::Vector3f ray2 = Rwc2 * r2;
 
+    // 在世界系下，计算极线约束的两条射线之间的夹角，如果夹角比较大，说明视差较大，可以三角化
     const float cosParallaxRays = ray1.dot(ray2) / (ray1.norm() * ray2.norm());
 
     // If parallax is lower than 0.9998, reject this match
@@ -455,7 +459,7 @@ float KannalaBrandt8::TriangulateMatches(
     const Eigen::Matrix3f &R12, const Eigen::Vector3f &t12, const float sigmaLevel,
     const float unc, Eigen::Vector3f &p3D)
 {
-    // 1. 得到对应特征点的相平面坐标
+    // 1. 得到对应特征点的相平面坐标：归一化坐标系坐标
     Eigen::Vector3f r1 = this->unprojectEig(kp1.pt);
     Eigen::Vector3f r2 = pCamera2->unprojectEig(kp2.pt);
 
@@ -463,14 +467,16 @@ float KannalaBrandt8::TriangulateMatches(
     // 2. 查看射线夹角
     // 这里有点像极线约束，但并不是，将r2通过R12旋转到与r1同方向的坐标系
     // 然后计算他们的夹角，看其是否超过1.14° 
-    Eigen::Vector3f r21 = R12 * r2;
+    Eigen::Vector3f r21 = R12 * r2;  // 旋转向量r2
 
+    // 计算两个射线之间的夹角
     const float cosParallaxRays = r1.dot(r21) / (r1.norm() * r21.norm());
 
     if (cosParallaxRays > 0.9998)
     {
-        return -1;
+        return -1;  // 夹角小于1度
     }
+    // 夹角较大，说明有一定的视差，三角化的精度足够
 
     // Parallax is good, so we try to triangulate
     cv::Point2f p11, p22;
@@ -588,6 +594,7 @@ void KannalaBrandt8::Triangulate(
 
 bool KannalaBrandt8::IsEqual(GeometricCamera *pCam)
 {
+    // 类型、参数数量、精确度、参数值 都一样
     if (pCam->GetType() != GeometricCamera::CAM_FISHEYE)
         return false;
 

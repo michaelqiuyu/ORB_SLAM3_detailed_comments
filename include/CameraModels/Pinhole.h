@@ -38,6 +38,7 @@ namespace ORB_SLAM3 {
 
     public:
         Pinhole() {
+            // 区别与鱼眼的8个参数，这里在构建Frame的时候，就会对特征点进行去畸变，因此不用保存畸变系数了
             mvParameters.resize(4);
             mnId=nNextId++;
             mnType = CAM_PINHOLE;
@@ -81,6 +82,7 @@ namespace ORB_SLAM3 {
 
         bool epipolarConstrain(GeometricCamera* pCamera2, const cv::KeyPoint& kp1, const cv::KeyPoint& kp2, const Eigen::Matrix3f& R12, const Eigen::Vector3f& t12, const float sigmaLevel, const float unc);
 
+        // 针孔模型中，直接返回false
         bool matchAndtriangulate(const cv::KeyPoint& kp1, const cv::KeyPoint& kp2, GeometricCamera* pOther,
                                  Sophus::SE3f& Tcw1, Sophus::SE3f& Tcw2,
                                  const float sigmaLevel1, const float sigmaLevel2,
