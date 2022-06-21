@@ -107,6 +107,105 @@
 				4. 执行UpdateFrameIMU，与上面相同
 				5. 优化的这段时间进来的关键帧，全部删除不要，清空mlNewKeyFrames
 
+	5. 跟踪线程
+		5.1 如果局部建图线程认为IMU有问题，就ResetActiveMap：重置当前活跃地图，不保存当前地图
+
+		5.2 mState != NO_IMAGES_YET
+			5.2.1 如果上一帧的时间戳大于当前帧的时间戳，那么就CreateMapInAtlas（保存当前地图，并创建一个新地图）
+			5.2.2 如果当前帧的时间戳>上一帧时间戳+1，那么仅处理惯性模式
+				1. 如果已经经过了第一阶段初始化
+					1.1 固脱没有完成第三阶段初始化，那么ResetActiveMap
+					1.2 否则，保存当前地图，并创建一个新地图CreateMapInAtlas
+				2. 否则，直接ResetActiveMap
+
+		5.3 如果是IMU模式下，就将上一关键帧的零偏赋值为当前帧
+
+		5.4 如果没有图像，就将状态mState设置为NOT_INITIALIZED
+
+		5.5 在IMU模式下，并且mbCreatedMap=False的时候，进行IMU预积分
+			5.5.1 对mbCreatedMap的阐述：
+				1. 创建地图的时候CreateMapInAtlas，mbCreatedMap=True，这个含义应该是刚刚创建地图，还没有图片信息，自然不需要预积分
+				2. 一旦有图片进来后，mbCreatedMap=false，这个时候就需要预积分了
+			5.5.2 PreintegrateIMU
+				1. 通过插值计算两帧之间的IMU测量值信息
+				2. 对上一帧执行IMU预积分计算，对上一关键帧执行预积分计算，注意pImuPreintegratedFromLastFrame为新建的局部变量，mpImuPreintegratedFromLastKF为Track的成员变量，并对当前帧的mpImuPreintegratedFrame、mpImuPreintegrated和mpLastKeyFrame进行赋值
+				3. 设置当前帧的预积分结束
+
+		5.6 初始化
+			5.6.1 单目初始化MonocularInitialization
+				1. mbReadyToInitializate为false
+					1.1 如果当前帧的特征点的数目>100，设置相关变量，如给mpImuPreintegratedFromLastKF、mCurrentFrame.mpImuPreintegrated赋值，并设置mbReadyToInitializate为true
+				2. 否则（第二帧来了）
+					2.1 条件1：特征点的数目<100；条件二：IMU模式，上一帧时间戳-初始帧时间戳>1；条件1/2只要满足其一，那么mbReadyToInitializate设置为false，并直接结束
+					2.2 两帧之间构建匹配，匹配的方法是窗口匹配（认为两帧比较接近，直接画圈搜索），匹配数量<100，那么mbReadyToInitializate设置为false，并直接结束；否则，执行2.3
+					2.3 两帧重建：ReconstructWithTwoViews
+						2.3.1 相机模型
+							1. 针孔相机：执行Reconstruct
+							2. 鱼眼相机：对特征点去畸变、执行Reconstruct；注意，鱼眼相机仅仅在初始化阶段执行去畸变，其他时候都是带着畸变进行处理
+						2.3.2 Reconstruct
+							1. 迭代创建最小集（8点法）
+							2. 多线程计算F和H，并计算得分，据此获得最优的几何模型
+							3. 从F或者H中分解出R和t
+					2.4 两帧重建成功，就执行CreateInitialMapMonocular
+						2.4.1 设置地图最开始的两个关键帧，如果是IMU模式，就设置第一个关键帧的mpImuPreintegrated为NULL
+						2.4.2 对两个关键帧计算词袋、插入地图、设置地图点
+						2.4.3 更新两帧之间的连接UpdateConnections，并设置尺度，并据此尺度，修改地图点和位姿
+						2.4.4 其他的一些必要操作，并设置mState为OK
+
+			5.6.2 双目/RGBD初始化StereoInitialization
+				1. 特征点的数目>500，否则，直接结束
+				2. 如果是IMU模式
+					1. 如果当前帧或者前一帧的mpImuPreintegrated为NULL，那么直接结束，也就是第一和第二帧不执行初始化
+					2. 如果非快速IMU初始化，并且当前帧的预积分的平均加速度-上一帧的预积分的平均加速度的模长<0.5，表示没有足够的加速度，直接结束
+					3. 如果mpImuPreintegratedFromLastKF不为NULL，就delete并重新new，并将其赋值给当前帧的mpImuPreintegrated
+				3. 如果是IMU模式，就是值当前帧的R、t、v，注意世界系为相机系，设置的是IMU的信息；否则，直接设置当前帧的位姿为单位阵
+				4. 设置当前帧为第一个关键帧，并将其添加到地图中
+				5. 如果是双目模式：对深度值为正的特征点，取出mvDepth中的值并构建地图点，并添加到地图中
+				6. 如果是左右目模式：取出mvStereo3Dpoints中的地图点，并构建地图点，并添加到地图中，注意，这里一个地图点在mvpMapPoints存储了两次，但是下标是不同的
+				7. 其他的一些必要的操作，并设置mState为OK
+
+			5.6.3 如果初始化失败，就将上一帧设置为当前帧，并直接结束；否则，如果当前地图是Atlas地图中的第一个子地图，那么就设置mnFirstFrameId为当前帧的mnId
+
+		5.7 跟踪模式
+			5.7.1 正常的SLAM模式
+				1. mstate == OK:
+					1.1 CheckReplacedInLastFram:检查上一帧中是否有点需要地图点在局部建图线程中被替换，如果发生替换，就将上一帧的地图点也对应替换，注意，这也是局部建图线程没有直接删除这些被替换的地图点的原因，如果在局部建图线程中被删除，那么上一帧中需要被替换的地图点也就被删除了，也就没办法执行替换操作了
+					1.2 条件1：没有速度且没有imu初始化；条件2：刚刚重定位成功；如果条件1或者条件2满足，那么就执行参考关键帧跟踪TrackReferenceKeyFrame：
+						1.2.1 TrackReferenceKeyFrame:
+							1. 
+					1.3 如果条件1和条件2都不满足，那么执行恒速模型跟踪TrackWithMotionModel，如果恒速模型跟踪失败，那么执行TrackReferenceKeyFrame
+						1.3.1 TrackWithMotionModel：
+							1. 
+					1.4 如果上面的跟踪都失败：
+						1.4.1 条件1：IMU模式；条件2：当前帧的ID<=上一次重定位成功的帧的ID+mnFramesToResetIMU（一般与相机帧率相同），也就是表示重定位成功没过多久就又失败了；条件1和条件2都满足的时候，就mState=LOST，认为跟丢了。否则，执行1.4.2 
+						1.4.2 当前地图中的关键帧数目超过10帧，执行mState=RECENTLY_LOST，也就是会利用其他信息继续跟踪，不认为跟丢了。并记录此时的时间戳信息mTimeStampLost，否则，执行1.4.3 
+						1.4.3 mstate=lost，认为跟丢了
+				2. mstate != OK:
+					2.1 mstate=recently_lost:
+						2.1.1 先设置bOK=true
+						2.1.2 如果是IMU模式，否则执行2.1.3：
+							1. 如果当前地图已经MU初始化，那么就执行PredictStateIMU：
+								1.1 
+							2. 否则，令bOK=false
+							3. 如果当前帧的时间戳减去跟丢的时间戳mTimeStampLost的值大于time_recently_lost（5s），那么，mstate=lost，也就是尝试重建跟踪失败了，并且令bOK=false
+						2.1.3 非IMU模式：
+							1. bOK=Relocalization:
+								1.1 
+							2. 如果重定位失败，并且当前帧的时间戳-跟丢的时间戳mTimeStampLost的值大于3s，那么认为跟丢了，mstate=lost，bOK=false
+					2.2 mstate=lost:
+						2.2.1 如果当前地图中的关键帧数目少于10帧，那么ResetActiveMap，也就是对这少量的几个关键帧不保存，否则
+						2.2.2 CreateMapInAtlas，保存当前地图，并新建一个新地图
+						2.2.3 将mpLastKeyFrame赋空
+
+			5.7.2 仅定位模式：此模式不运行局部建图线程和回环线程
+				1. 
+
+
+
+
+
+
+
 
 
 
