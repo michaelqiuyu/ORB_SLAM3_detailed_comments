@@ -1989,7 +1989,7 @@ namespace ORB_SLAM3
         const Eigen::Vector3f twc = Tcw.inverse().translation();
 
         const Sophus::SE3f Tlw = LastFrame.GetPose();
-        const Eigen::Vector3f tlc = Tlw * twc; 
+        const Eigen::Vector3f tlc = Tlw * twc;  // 当前帧相对于上一帧的位姿，可以表示连续帧之间的运动
 
         // 判断前进还是后退
         const bool bForward = tlc(2)>CurrentFrame.mb && !bMono;     // 非单目情况，如果Z大于基线，则表示相机明显前进

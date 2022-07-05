@@ -1641,7 +1641,7 @@ static void computeDescriptors(const Mat& image, vector<KeyPoint>& keypoints, Ma
             //Mat desc = descriptors.rowRange(offset, offset + nkeypointsLevel);
             Mat desc = cv::Mat(nkeypointsLevel, 32, CV_8U);
 			// Step 6 计算高斯模糊后图像的描述子
-        computeDescriptors(workingMat, 	//高斯模糊之后的图层图像
+            computeDescriptors(workingMat, 	//高斯模糊之后的图层图像
 						   keypoints, 	//当前图层中的特征点集合
 						   desc, 		//存储计算之后的描述子
 						   pattern);	//随机采样点集

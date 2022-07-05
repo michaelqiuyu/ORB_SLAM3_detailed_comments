@@ -3613,6 +3613,7 @@ bool Tracking::TrackLocalMap()
             }
             // 如果这个地图点是外点,并且当前相机输入还是双目的时候,就删除这个点
             // 原因分析：因为双目本身可以左右互匹配，删掉无所谓
+            // notes: 到了局部建图个跟踪这里，并不会轻易的将当前帧的某个地图点赋值为空了，这有在双目情形才会这样做
             else if(mSensor==System::STEREO)
                 mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
         }
