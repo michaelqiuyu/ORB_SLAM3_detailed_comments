@@ -738,7 +738,7 @@ bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame*
         if(mpTracker->mSensor==System::IMU_MONOCULAR && !pCurrentKF->GetMap()->GetIniertialBA2())
             bFixedScale=false;
         // 3.2 优化gScm，mp固定
-        // xc's todo: 此处是不是有一些问题：nNumProjMatches>=numOptMatches必然成立，但是nProjOptMatches > nProjMatches，这里的阈值设置有些矛盾，优化后的匹配只会更少
+        // xc's todo: 此处是不是有一些问题：nNumProjMatches>=numOptMatches必然成立，但是nProjOptMatches > nProjMatches不一定成立，这里的阈值设置有些矛盾，优化后的匹配只会更少
         int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pMatchedKF, vpMatchedMPs, gScm, 10, bFixedScale, mHessian7x7, true);
 
         //Verbose::PrintMess("Sim3 reffine: There are " + to_string(numOptMatches) + " matches after of the optimization ", Verbose::VERBOSITY_DEBUG);
@@ -804,9 +804,9 @@ bool LoopClosing::DetectCommonRegionsFromBoW(
 
 
     ORBmatcher matcherBoW(0.9, true);  // 用于search by bow
-    ORBmatcher matcher(0.75, true);  // 用与seach by projection
+    ORBmatcher matcher(0.75, true);  // 用与search by projection
 
-    // Varibles to select the best numbe
+    // Varibles to select the best number
     // 一些用于统计最优数据的变量,我们最后返回的是最佳的一个关键帧(几何校验匹配数最高的)
     KeyFrame* pBestMatchedKF;
     int nBestMatchesReproj = 0;
@@ -955,6 +955,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(
 
             // 3.1 初始化sim3 solver
             // Sim3Solver 的接口与orbslam2略有不同, 因为现在是1-N的对应关系
+            // notes: 这里的vpMatchedPoints并不一定是当前关键帧与pMostBoWMatchesKF构建的匹配
             Sim3Solver solver = Sim3Solver(mpCurrentKF, pMostBoWMatchesKF, vpMatchedPoints, bFixedScale, vpKeyFrameMatchedMP);
             // Sim3Solver Ransac 置信度0.99，至少20个inliers 最多300次迭
             solver.SetRansacParameters(0.99, nBoWInliers, 300); // at least 15 inliers
