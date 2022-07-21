@@ -431,6 +431,7 @@
 			7.1.1 当相机跟踪失败就开始重定位，如果过了一段时间重定位仍然失败，则将活跃地图标记为不活跃地图，存储在地图集合里。然后初始化一个新地图，评判跟踪丢失的标准：
 			7.1.2 成功匹配的特征点的数量：当前帧和局部地图中成功匹配数量高于定义的阈值
 			7.1.3 相机位姿的可观测性：如果检测到的点几何条件不好（如天空这样的远点），那么估计的相机也不准，相机位姿是不客观的；这种时候，位姿不准确的关键帧会被删除，地图覆盖的范围可能会减小，但是地图的精度将会显著上升。
+
 		7.2 什么时候新建地图
 			7.2.1 SLAM系统刚启动，席间地图集Atlas类的时候
 			7.2.2 跟踪线程中时间戳异常的时候
@@ -438,153 +439,224 @@
 				1. 如果是第一阶段跟踪丢失，当前活跃地图的处理方法：如果当前活跃地图中关键帧数量小于10个，认为该地图中有效信息太少，直接重置，丢弃当前地图；否则，该地图仍有一定价值，存储起来并新建一个地图
 				2. 如果到第二阶段跟踪丢失，当前活跃地图的处理方法：如果当前是纯视觉模式且地图中关键帧超过5个或者IMU模式下已经完成IMU初始化，认为该地图仍有一定价值，存储起来并新建一个地图；否则重置，丢弃当前地图
 
+		7.3 CheckNewKeyFrames(): 查看还有没有还没有处理的关键帧
 
-		计算当前关键帧的世界系w1到融合关键帧的世界系w2的变换，并赋值为mSold_new，计算的过程为gSw2m*gSmc*gScw1，其中gSw2m表示融合关键帧的位姿，gScw1表示当前关键帧的位姿，gSmc是根据相似变换并优化得到
+		7.4 将上一关键帧的回环候选和合并候选关键帧容器清空
 
-		如果当前关键帧的地图与融合关键帧对应的地图都是惯性模式：
-			1. 如果两个地图的尺度相差比较大，就放弃融合，输出两个地图就可以了，此时执行：mpMergeLastCurrentKF和mpMergeMatchedKF可以删除了，mnMergeNumCoincidences和mnMergeNumNotFound重置为0，mvpMergeMatchedMPs和mvpMergeMPs清空，mbMergeDetected设置为false，然后执行下一次循环，否则继续往后面执行
+		7.5 检测共视区域：bFindedRegion=NewDetectCommonRegions：
+			7.5.1 如果一开始就不做回环，就直接结束（mbActiveLC）
 
-			2. 如果处于单目IMU模式或者双目IMU模式，并且当前关键帧对应的地图已经执行了第二阶段的初始化了，那么获取mSold_new对应的轴角，并将pitch和roll都设置为0，并重新计算mSold_new（注意此时的尺度令为1了）；这样做的理由是两个地图的重力方向一致，那么两个地图的世界系的Z轴方向也是一致的，因此也就只有yaw角不同，他们的pitch和roll应该是一样的
+			7.5.2 取出缓存的候选关键帧中最早的关键帧为当前关键帧，并将其设置为不要删除，并设置mbCurrentPlaceRecognition为true，并获取当前关键帧的地图mpLastMap
 
-		更新mg2oMergeScw=mg2oMergeSlw
+			7.5.3 如果mpLastMap是惯性模式，但是还没有经过第三阶段的IMU初始化，那么直接将当前关键帧加入到关键帧数据库中，并设置可以删除，然后直接结束，返回false
 
-		如果是在IMU模式下，执行MergeLocal2：将旧的地图合并到当前关键帧的地图里面
-			1. 如果正在进行全局BA，那么就停止全局BA；局部建图线程暂停，等待局部建图线程停止；获取当前关键帧的地图pCurrentMap，获取合并关键帧的地图pMergeMap
-			2. 利用mSold_new的旋转平移构建位姿T_on；清空局部建图线程还没有处理的关键帧；如果mSold_new的尺度不是1，则bScaleVel为true，否则为false（我们知道，如果在单目IMU模式或者双目IMU模式，mSold_new的尺度会被更新为1，也就是此时认为两个地图尺度是一致的，不会更新当前地图的尺度），然后将当前关键帧对应的地图变换到融合关键帧对应的地图的世界系中，使用函数ApplyScaledRotation实现，此函数上面已经分析；使用UpdateFrameIMU将尺度和零偏更新到普通帧
-			3. 如果是IMU模式，并且还没有完成第三阶段初始化，对加速度零偏和陀螺仪零偏赋0，并使用InertialOptimization优化零偏，然后将零偏使用UpdateFrameIMU更新到普通帧中（注意在优化函数InertialOptimization中，关键帧的位姿的零偏已经更新了）；设置当前地图已经完成了全部三阶段的初始化
-			4. 将融合关键帧对应的地图中的关键帧和地图点合并到当前关键帧对应的地图中：
-				4.1 获取融合关键帧的地图中的所有的关键帧和所有的地图点
-				4.2 遍历关键帧，如果这个关键帧非空、不是bad、并且对应的地图是融合关键帧的地图，那么
-					4.2.1 pKF->UpdateMap(pCurrentMap): 更改关键帧对应的地图
-					4.2.2 pCurrentMap->AddKeyFrame(pKF)：
-						1. 如果mspKeyFrames为空，那么这个关键帧是第一个关键帧，设置mnInitKFid、mpKFinitial和mpKFlowerID
-						2. 在mspKeyFrames中插入这个关键帧，并更新最大的mnID和mpKFlowerID（最小的mnId对应的关键帧）
-					4.2.3 pMergeMap->EraseKeyFrame(pKF)：
-						1. 从mspKeyFrames中删除这个关键帧
-						2. 更新mpKFlowerID
-				4.3 遍历地图点，如果这个地图点非空、不是bad、并且对应的地图是融合关键帧的地图，那么
-					4.3.1 pMP->UpdateMap(pCurrentMap)：更改地图点对应的地图即可
-					4.3.2 pCurrentMap->AddMapPoint(pMP)：在地图的mspMapPoints中插入这个地图点即可
-					4.3.3 pMergeMap->EraseMapPoint(pMP)：在地图的mspMapPoints中删除这个地图点即可
-				4.4 此处可能有bug，没有将mergeMap设置为bad，后续不好删除
-				4.5 获取当前关键帧对应的地图中所有的关键帧，然后遍历这些关键帧，根据其位姿构建g2oSiw，尺度为1，然后添加到NonCorrectedSim3中
-			5. 将融合关键帧的地图的生成树添加到当前关键帧的地图中：将融合关键帧的父亲设置为当前关键帧；获取融合关键帧的父亲、祖父...祖宗，然后将父→子修改为子→父，也就是逻辑上将父子之间的关系对调，这样就能保证一个孩子只有一个父亲了
-			6. 获取融合关键帧的局部窗口：获取融合关键帧及其共视关键帧，并最多只选择前6个关键帧添加到mvpMergeConnectedKFs中
-			7. 更新当前关键帧的连接关系，并获取当前关键帧的局部窗口：获取当前关键帧及其共视关键帧，并最多只选择前6个关键帧添加到vpCurrentConnectedKFs中
-			8. 获取mvpMergeConnectedKFs中关键帧的最多的1000个地图点添加到spMapPointMerge，然后copy到vpCheckFuseMapPoint中
-			9. SearchAndFuse：参数为当前关键帧的窗口vpCurrentConnectedKFs、vpCheckFuseMapPoint中的地图点：
-				9.1 遍历关键帧，对每一个关键帧根据其位姿构建Scw，尺度为1，然后执行matcher.Fuse：
-					9.1.1 将地图点往关键帧进行投影获取匹配，如果特征点早已经有了地图点，就将其添加到vpReplacePoints，后续会进行替换；否则直接添加这个关键帧到这个地图点的观测中，并在这个关键帧的地图点中添加这个地图点
-				9.2 遍历vpReplacePoints，并在满足条件的情况下执行替换pRep->Replace(pMP):也就是用pMP替换pRep，在这里是使用融合关键帧窗口中的地图点替换掉当前关键帧窗口中的地图点
-					9.2.1 如果两个地图点的ID相同，那么直接结束，不用替换了，两个点是同一个点
-					9.2.2 记录pRep的mObservations、mnVisible和mnFound，并清空mObservations
-					9.2.3 遍历观测mObservations
-						1. 如果pMP不在关键帧的地图点中，那么这个关键帧替换观测的地图点，这个地图点的观测添加这个关键帧
-						2. 如果pMP在关键帧的地图点中，那就是一个特征点对应有两个地图点，这是不被允许的，这个时候删除这个关键帧对pRep的观测，也就是在地图点中删除pRef就可以了
-					9.2.4 pMP的nFound和nVisible递增，pMP的描述子更新，地图删除pRep这个地图点
+			7.5.4 如果是在双目模式下，并且mpLastMap中的关键帧的数量少于5，那么直接将当前关键帧加入到关键帧数据库中，并设置可以删除，然后直接结束，返回false
 
-			10. 遍历当前关键帧的窗口vpCurrentConnectedKFs，更新关键帧的连接关系；遍历合并关键帧的窗口mvpMergeConnectedKFs，更新关键帧的连接关系
-			11. 如果当前关键帧对应的地图里面的关键帧的数量少于10，那么释放局部建图线程Release，并直接结束：
-				11.1 如果mbFinished为true，直接结束
-				11.2 设置mbStopped和mbStopRequested为false
-				11.3 释放mlNewKeyFrames中的关键帧指针；清空mlNewKeyFrames
-			12. 执行优化MergeInertialBA：参数为track的最近的关键帧、合并关键帧、bStopFlag（初值为false）、当前关键帧的地图、CorrectedSim3（当前还是空）
-			13. 释放局部建图线程Release
+			7.5.5 如果mpLastMap中关键帧的数量少于12，那么直接将当前关键帧加入到关键帧数据库中，并设置可以删除，然后直接结束，返回false
+
+			7.5.6 如果mnLoopNumCoincidences>0，注意初始化的时候mnLoopNumCoincidences为0：
+				1. 设置bCheckSpatial为true，
+				2. 利用当前关键帧的位姿和mpLoopLastCurrentKF（注意，其在DetectCommonRegionsFromBoW中有可能会被赋值为上一次的当前关键帧，在这里其实就是上一关键帧了）关键帧的位姿计算位姿Tcl，并据此构建gScl，尺度为1；利用gScl和DetectCommonRegionsFromBoW中计算的sim3变换mg2oLoopSlw计算gScw
+				3. bCommonRegion=DetectAndReffineSim3FromLastKF:参数为当前关键帧、mpLoopMatchedKF、gScw、numProjMatches记录匹配数量、mvpLoopMPs（表示上一次搜索的时候，回环帧的最好的10个共视关键帧的所有非空非bad的地图点）、vpMatchedMPs记录匹配的地图点
+					3.1 FindMatchesByProjection获取匹配数量，如果匹配数量少于阈值nProjMatches则返回false，否则继续往后面执行
+					3.2 根据gScw和gSwm计算gScm，执行OptimizeSim3优化gScm并获取内点数目，如果内殿数目少于阈值nProjOptMatches则返回false，否则继续往后面执行；这里有一个问题，nNumProjMatches>=numOptMatches必然成立，但是nProjOptMatches>nProjMatches不一定成立，这里的阈值设置有些矛盾，优化后的匹配只会更少
+					3.3 这里应该有一个bug，代码里面使用的是mScw，实际上应该使用优化得到的gScm与gswm计算得到gScw
+					3.4 使用新的gScw再次调用FindMatchesByProjection，获取匹配的数目nNumProjMatches，如果大于阈值nProjMatchesRep，则返回true，并将gScw更新为最新计算的gScw，否则返回false
+				4. 如果bCommonRegion为true
+					4.1 标记时序检验成功bLoopDetectedInKF=true，mnLoopNumCoincidences累加；设置mpLoopLastCurrentKF可以删除了，并更新mpLoopLastCurrentKF为当前关键帧；更新mg2oLoopSlw为DetectAndReffineSim3FromLastKF中计算的gScw；mvpLoopMatchedMPs记录匹配到的地图点，重置时序检验失败的次数mnLoopNumNotFound为0，并判断mbLoopDetected=mnLoopNumCoincidences>=3
+				5. 如果bCommonRegion为false
+					5.1 当前时序检验失败bLoopDetectedInKF为false，mnLoopNumNotFound递增，如果mnLoopNumNotFound大于等于2，那么重置一些信息：mpLoopLastCurrentKF和mpLoopMatchedKF设置为可以删除、mnLoopNumCoincidences和mnLoopNumNotFound重置为0，mvpLoopMatchedMPs和mvpLoopMPs清空
+
+			7.5.7 如果mnMergeNumCoincidences>0，注意初始化的时候mnMergeNumCoincidences为0：
+				1. 利用当前关键帧的位姿和mpMergeLastCurrentKF（注意，其在DetectCommonRegionsFromBoW中有可能会被赋值为上一次的当前关键帧，在这里其实就是上一关键帧了）关键帧的位姿计算位姿Tcl，并据此构建gScl，尺度为1；利用gScl和DetectCommonRegionsFromBoW中计算的sim3变换mg2oMergeSlw计算gScw
+				3. bCommonRegion=DetectAndReffineSim3FromLastKF，同上
+				4. 如果bCommonRegion为true
+					4.1 标记时序检验成功bMergeDetectedInKF=true，mnMergeNumCoincidences累加；设置mpMergeLastCurrentKF可以删除了，并更新mpMergeLastCurrentKF为当前关键帧；更新mg2oMergeSlw为DetectAndReffineSim3FromLastKF中计算的gScw；mvpMergeMatchedMPs记录匹配到的地图点，并判断mbMergeDetected=mnMergeNumCoincidences>=3
+				5. 如果bCommonRegion为false
+					5.1 当前时序检验失败bMergeDetectedInKF为false且mbMergeDetected为false，mnMergeNumNotFound递增，如果mnMergeNumNotFound大于等于2，那么重置一些信息：mpMergeLastCurrentKF和mmpMergeMatchedKF设置为可以删除、mnMergeNumCoincidences和mnMergeNumNotFound重置为0，mvpMergeMatchedMPs和mvpMergeMPs清空
+
+			7.5.8 如果mbLoopDetected为true或者mbMergeDetected为true；注意初始化的时候mbMergeDetected=mbLoopDetected=false
+				1. 将当前帧添加到关键帧数据库中，然后直接结束，返回true，表示找到了共视
+				2. 由于这里找到了共视，因此当前关键帧不会设置可以删除
+
+			7.5.9 获取当前关键帧的共视关键帧GetVectorCovisibleKeyFrames，此句实际上没有使用
+
+			7.5.10 如果bMergeDetectedInKF为false或者bLoopDetectedInKF为false，此时在关键帧数据库中获取最好的几个候选关键帧，并放到vpMergeBowCand（不同map）和vpLoopBowCand（同map），mpKeyFrameDB->DetectNBestCandidates：
+				1. 获得与当前关键帧有相同单词的关键帧及相同的单词的数量；如果没有相同单词的关键帧，那么直接结束
+				2. 获得相同单词数的最大值，并取minCommonWords=maxCommonWords*0.8f为阈值，筛选获取的关键帧；并计算筛选的关键帧与当前关键帧的得分；如果没有满足条件的关键帧，那么就直接结束
+				3. 对每一个筛选的关键帧，设置累计得分accScore，并令初值为这个关键帧与当前关键帧的词袋得分，并获取其共视最好的10帧关键帧；对每一个关键帧，如果其与当前关键帧有相同单词，那么就计算这个关键帧与当前关键帧的词袋得分并累加到accScore上，并获取这些共视关键帧中与当前关键帧具有最大词袋得分的关键帧；将信息存储到lAccScoreAndMatch中，并对其按照得分进行排序
+				4. 遍历lAccScoreAndMatch，将其添加到vpLoopCand和vpMergeCand中，标准在于候选关键帧与当前关键帧是否是一个地图；直到vpLoopCand和vpMergeCand的数量满足要求，或者lAccScoreAndMatch遍历结束；因此vpLoopCand和vpMergeCand并不一定能够获取到指定的nNumCandidates个
+
+			7.5.11 如果bLoopDetectedInKF为false且vpLoopBowCand不为空，那么mbLoopDetected=DetectCommonRegionsFromBoW：
+				1. 参数为：vpLoopBowCand候选的闭环关键帧、mpLoopMatchedKF记录找到的闭环关键帧、mpLoopLastCurrentKF当成功闭环的时候赋值为当前关键帧、mg2oLoopSlw计算sim3变换、mnLoopNumCoincidences几何检验通过的次数、mvpLoopMPs回环关键帧的20个共视关键帧的所有非空非bad的地图点、mvpLoopMatchedMPs表示mvpLoopMPs在当前关键帧的匹配情况
+				2. 获取当前关键帧的连接关键帧spConnectedKeyFrames
+				3. 对每一个候选关键帧：
+					3.1 获取其指定数量的最优的共视关键帧，并添加这个候选关键帧到最前面vpCovKFi；判断vpCovKFi与spConnectedKeyFrames有没有交集，如果有的话，就直接到下一个候选关键帧，否则继续往后面执行，令pMostBoWMatchesKF为当前的候选关键帧（这里的逻辑可能不太对，应该是选择跟当前关键帧共视最多的关键帧赋值给pMostBoWMatchesKF）
+					3.2 遍历共视关键帧vpCovKFi，计算其与当前关键帧的词袋匹配，并记录最优的词袋匹配对应的下标和匹配数量、匹配的地图点等
+					3.3 获取所有的地图点到spMatchedMPi中，并记录匹配的地图点的数目numBoWMatches、将所有的匹配的信息添加到vpMatchedPoints和vpKeyFrameMatchedMP中，注意对vpMatchedPoints和vpKeyFrameMatchedMP而言，后面的信息有可能会覆盖前面的信息；如果numBoWMatches小于阈值nBoWMatches就直接进入到下一个候选关键帧，否则继续往后面执行
+					3.4 首先给bFixedScale赋值，如果是IMU单目模式并且还没有经过第三阶段初始化，那么将bFixedScale设为false；构建sim3求解器，并迭代直到收敛，如果没有收敛，那么直接进入到下一个候选关键帧，否则继续往后面执行
+					3.5 清空vpCovKFi，并重新计算pMostBoWMatchesKF的指定数量的最优的连接关键帧，并赋值给vpCovKFi，并添加pMostBoWMatchesKF到vpCovKFi中
+					3.6 遍历vpCovKFi中的关键帧：获取每一帧对应的地图点到spMapPoints和vpMapPoints中，将地图点对应的关键帧添加到vpKeyFrames中
+					3.7 获取前面sim3求解器求得的旋转、平移和尺度gScm，利用pMostBoWMatchesKF的位姿构建sim3的gSmw，注意其旋转平移为pMostBoWMatchesKF的位姿，尺度为1；通过gScm*gSmw计算gScw
+					3.8 通过gScw将vpMapPoints中的地图点往当前关键帧进行投影匹配，获取投影的地图点和对应的关键帧；如果匹配的地图点的数量少于阈值nProjMatches，那么直接进入到下一个候选关键帧，否则继续往后面执行
+					3.9 首先给bFixedScale赋值，如果是IMU单目模式并且还没有经过第三阶段初始化，那么将bFixedScale设为false；然后使用OptimizeSim3优化gScm，并计算此时的内点数量，如果数量少于阈值nSim3Inliers，那么直接进入到下一个候选关键帧，否则继续往后面执行
+					3.10 利用pMostBoWMatchesKF的位姿构建sim3的gSmw，注意其旋转平移为pMostBoWMatchesKF的位姿，尺度为1；通过gScm*gSmw计算gScw，通过gScm*gSmw计算gScw，注意这里的gScm是经过优化了的，再次通过gScw将vpMapPoints中的地图点往当前关键帧进行投影匹配，获取投影的地图点和对应的关键帧；如果匹配的地图点的数量numProjOptMatches少于阈值nProjMatches，那么直接进入到下一个候选关键帧，否则继续往后面执行
+					3.11 获取当前关键帧指定数量的最优的共视关键帧并赋值到vpCurrentCovKFs中，遍历vpCurrentCovKFs开始进行几何校验：
+						3.11.1 对每一个共视关键帧，根据其与当前关键帧的位姿计算Tjc，也就是当前关键帧到这个共视关键帧直接的变换；然后利用Tjc构建gSjc，尺度为1
+						3.11.2 通过gSjc*gScw计算gSjw，注意gScw是通过gScm的改变来更新的
+						3.11.3 执行几何校验函数DetectCommonRegionsFromLastKF：参数为共视关键帧、pMostBoWMatchesKF、gSjw、记录匹配数量numProjMatches_j、vpMapPoints、记录匹配的地图点vpMatchedMPs_j
+							1. 设置set<MapPoint*> spAlreadyMatchedMPs(vpMatchedMPs.begin(), vpMatchedMPs.end())
+							2. 执行FindMatchesByProjection获得匹配的数量：pCurrentKF, pMatchedKF, gScw, spAlreadyMatchedMPs, vpMPs, vpMatchedMPs，注意这里的pCurrentKF并不是上面的当前关键帧
+								2.1 获取pMatchedKFw的指定数量的最优的共视关键帧到vpCovKFm中，并将pMatchedKFw也添加到vpCovKFm中，并构建set容器spCheckKFs(vpCovKFm.begin(),vpCovKFm.end())
+								2.2 获取pCurrentKF的所有的连接关键帧到spCurrentCovisbles中
+								2.3 如果vpCovKFm的size小于阈值nNumCovisibles，那么扩展vpCovKFm的规模，方法是获取vpCovKFm中关键帧的指定数量的最优的共视关键帧，并将其添加到vpCovKFm中
+								2.4 遍历vpCovKFm获取其所有的地图点，添加到spMapPoints和vpMapPoints中
+								2.5 通过将vpMapPoints中的地图点使用mScw往pCurrentKF中投影获取匹配，并记录匹配数量
+							3. 如果匹配的数量少于阈值nProjMatches，则返回false；否则，返回true；
+					3.12 如果numProjOptMatches大于nBestMatchesReproj（初值为0），那么更新nBestMatchesReproj、nBestNumCoindicendes、pBestMatchedKF、g2oBestScw、vpBestMapPoints和vpBestMatchedMapPoints
+				4. 如果nBestMatchesReproj大于0，那么更新pLastCurrentKF、nNumCoincidences、pMatchedKF2并设置其不可删除、g2oScw、vpMPs、vpMatchedMPs，并返回nNumCoincidences >= 3
+				5. 如果nBestMatchesReproj不大于0，那么返回false
+
+			7.5.12 如果bMergeDetectedInKF为false且vpMergeBowCand不为空，那么mbMergeDetected=DetectCommonRegionsFromBoW
+				1. 参数为：vpMergeBowCand候选的合并关键帧、mpMergeMatchedKF记录找到的合并关键帧、mpMergeLastCurrentKF当成功合并的时候赋值为当前关键帧、mg2oMergeSlw计算sim3变换、mnMergeNumCoincidences几何检验通过的次数、mvpMergeMPs合并关键帧的20个共视关键帧的所有非空非bad的地图点、mvpMergeMatchedMPs表示mvpLoopMPs在当前关键帧的匹配情况
+
+			7.5.13 将当前关键帧添加到关键帧数据库中；如果mbMergeDetected为true或者mbLoopDetected为true，就直接返回true
+
+			7.5.14 设置当前关键帧可以删除；设置当前关键帧的mbCurrentPlaceRecognition为false
+
+		7.6 如果bFindedRegion为true
+			7.6.1 如果同时检测到回环和地图合并，那么只执行合并
+			7.6.2 如果mbMergeDetected为true
+				1. 如果是IMU模式并且还没有初始化，那么直接运行到5，否则运行2
+				2. 计算当前关键帧的世界系w1到融合关键帧的世界系w2的变换，并赋值为mSold_new，计算的过程为gSw2m*gSmc*gScw1，其中gSw2m表示融合关键帧的位姿，gScw1表示当前关键帧的位姿，gSmc是根据相似变换并优化得到;如果当前关键帧的地图与融合关键帧对应的地图都是惯性模式：
+					2.1 如果两个地图的尺度相差比较大，就放弃融合，输出两个地图就可以了，此时执行：mpMergeLastCurrentKF和mpMergeMatchedKF可以删除了，mnMergeNumCoincidences和mnMergeNumNotFound重置为0，mvpMergeMatchedMPs和mvpMergeMPs清空，mbMergeDetected设置为false，然后执行下一次循环，否则继续往后面执行
+					2.2 如果处于单目IMU模式或者双目IMU模式，并且当前关键帧对应的地图已经执行了第二阶段的初始化了，那么获取mSold_new对应的轴角，并将pitch和roll都设置为0，并重新计算mSold_new（注意此时的尺度令为1了）；这样做的理由是两个地图的重力方向一致，那么两个地图的世界系的Z轴方向也是一致的，因此也就只有yaw角不同，他们的pitch和roll应该是一样的
+				3. 如果是在IMU模式下，执行MergeLocal2：将旧的地图合并到当前关键帧的地图里面
+					3.1 如果正在进行全局BA，那么就停止全局BA；局部建图线程暂停，等待局部建图线程停止；获取当前关键帧的地图pCurrentMap，获取合并关键帧的地图pMergeMap
+					3.2 利用mSold_new的旋转平移构建位姿T_on；清空局部建图线程还没有处理的关键帧；如果mSold_new的尺度不是1，则bScaleVel为true，否则为false（我们知道，如果在单目IMU模式或者双目IMU模式，mSold_new的尺度会被更新为1，也就是此时认为两个地图尺度是一致的，不会更新当前地图的尺度），然后将当前关键帧对应的地图变换到融合关键帧对应的地图的世界系中，使用函数ApplyScaledRotation实现，此函数上面已经分析；使用UpdateFrameIMU将尺度和零偏更新到普通帧
+					3.3 如果是IMU模式，并且还没有完成第三阶段初始化，对加速度零偏和陀螺仪零偏赋0，并使用InertialOptimization优化零偏，然后将零偏使用UpdateFrameIMU更新到普通帧中（注意在优化函数InertialOptimization中，关键帧的位姿的零偏已经更新了）；设置当前地图已经完成了全部三阶段的初始化
+					3.4 将融合关键帧对应的地图中的关键帧和地图点合并到当前关键帧对应的地图中：
+						3.4.1 获取融合关键帧的地图中的所有的关键帧和所有的地图点
+						3.4.2 遍历关键帧，如果这个关键帧非空、不是bad、并且对应的地图是融合关键帧的地图，那么
+							1 pKF->UpdateMap(pCurrentMap): 更改关键帧对应的地图
+							2 pCurrentMap->AddKeyFrame(pKF)：
+								2.1 如果mspKeyFrames为空，那么这个关键帧是第一个关键帧，设置mnInitKFid、mpKFinitial和mpKFlowerID
+								2.2 在mspKeyFrames中插入这个关键帧，并更新最大的mnID和mpKFlowerID（最小的mnId对应的关键帧）
+							3 pMergeMap->EraseKeyFrame(pKF)：
+								3.1 从mspKeyFrames中删除这个关键帧
+								3.2 更新mpKFlowerID
+						3.4.3 遍历地图点，如果这个地图点非空、不是bad、并且对应的地图是融合关键帧的地图，那么
+							1 pMP->UpdateMap(pCurrentMap)：更改地图点对应的地图即可
+							2 pCurrentMap->AddMapPoint(pMP)：在地图的mspMapPoints中插入这个地图点即可
+							3 pMergeMap->EraseMapPoint(pMP)：在地图的mspMapPoints中删除这个地图点即可
+						3.4.4 此处可能有bug，没有将mergeMap设置为bad，后续不好删除
+						3.4.5 获取当前关键帧对应的地图中所有的关键帧，然后遍历这些关键帧，根据其位姿构建g2oSiw，尺度为1，然后添加到NonCorrectedSim3中
+					3.5 将融合关键帧的地图的生成树添加到当前关键帧的地图中：将融合关键帧的父亲设置为当前关键帧；获取融合关键帧的父亲、祖父...祖宗，然后将父→子修改为子→父，也就是逻辑上将父子之间的关系对调，这样就能保证一个孩子只有一个父亲了
+					3.6 获取融合关键帧的局部窗口：获取融合关键帧及其共视关键帧，并最多只选择前6个关键帧添加到mvpMergeConnectedKFs中
+					3.7 更新当前关键帧的连接关系，并获取当前关键帧的局部窗口：获取当前关键帧及其共视关键帧，并最多只选择前6个关键帧添加到vpCurrentConnectedKFs中
+					3.8 获取mvpMergeConnectedKFs中关键帧的最多的1000个地图点添加到spMapPointMerge，然后copy到vpCheckFuseMapPoint中
+					3.9 SearchAndFuse：参数为当前关键帧的窗口vpCurrentConnectedKFs、vpCheckFuseMapPoint中的地图点：
+						3.9.1 遍历关键帧，对每一个关键帧根据其位姿构建Scw，尺度为1，然后执行matcher.Fuse：
+							1 将地图点往关键帧进行投影获取匹配，如果特征点早已经有了地图点，就将其添加到vpReplacePoints，后续会进行替换；否则直接添加这个关键帧到这个地图点的观测中，并在这个关键帧的地图点中添加这个地图点
+						3.9.2 遍历vpReplacePoints，并在满足条件的情况下执行替换pRep->Replace(pMP):也就是用pMP替换pRep，在这里是使用融合关键帧窗口中的地图点替换掉当前关键帧窗口中的地图点
+							1 如果两个地图点的ID相同，那么直接结束，不用替换了，两个点是同一个点
+							2 记录pRep的mObservations、mnVisible和mnFound，并清空mObservations
+							3 遍历观测mObservations
+								3.1 如果pMP不在关键帧的地图点中，那么这个关键帧替换观测的地图点，这个地图点的观测添加这个关键帧
+								3.2 如果pMP在关键帧的地图点中，那就是一个特征点对应有两个地图点，这是不被允许的，这个时候删除这个关键帧对pRep的观测，也就是在地图点中删除pRef就可以了
+							4 pMP的nFound和nVisible递增，pMP的描述子更新，地图删除pRep这个地图点
+
+					3.10 遍历当前关键帧的窗口vpCurrentConnectedKFs，更新关键帧的连接关系；遍历合并关键帧的窗口mvpMergeConnectedKFs，更新关键帧的连接关系
+					3.11 如果当前关键帧对应的地图里面的关键帧的数量少于10，那么释放局部建图线程Release，并直接结束：
+						3.11.1 如果mbFinished为true，直接结束
+						3.11.2 设置mbStopped和mbStopRequested为false
+						3.11.3 释放mlNewKeyFrames中的关键帧指针；清空mlNewKeyFrames
+					3.12 执行优化MergeInertialBA：参数为track的最近的关键帧、合并关键帧、bStopFlag（初值为false）、当前关键帧的地图、CorrectedSim3（当前还是空）
+					3.13 释放局部建图线程Release
+
+				4. 如果不是在IMU模式下，执行MergeLocal：将新的地图合并到旧的地图里面
+					4.1 如果正在进行全局BA，那么就停止全局BA；局部建图线程暂停，等待局部建图线程停止；清空局部建图线程的关键帧；获取当前关键帧的地图pCurrentMap，获取合并关键帧的地图pMergeMap；更新当前关键帧的连接关系
+					4.2 获取当前关键帧的窗口的关键帧spLocalWindowKFs：使用的循环获取指定数量的关键帧，避免关键帧的数量太少，并将这些关键帧的地图点全部添加到spLocalWindowMPs中
+					4.3 与当前关键帧相同，获取融合关键帧的窗口的关键帧spMergeConnectedKFs以及这些关键帧对应的地图点spMapPointMerge，并将这些地图点copy到vpCheckFuseMapPoint中
+					4.4 计算未矫正的位姿和已矫正的位姿：
+						4.4.1 获取当前关键帧的位姿添加到vNonCorrectedSim3中，获取mg2oMergeScw添加到vCorrectedSim3中
+						4.4.2 遍历当前关键帧窗口中的关键帧：
+							1 如果这个关键帧就是当前关键帧，那么直接获取g2oCorrectedSiw=g2oCorrectedScw，否则
+							2 获取这个关键帧的位姿添加到vNonCorrectedSim3中，计算当前关键帧到这个关键帧的位姿，再使用世界到当前关键帧的sim3位姿，计算世界到这个关键帧的sim3位姿g2oCorrectedSiw，并添加到vCorrectedSim3中
+							3 将g2oCorrectedSiw的尺度赋值给这个关键帧的mfScale，去除g2oCorrectedSiw的尺度计算得到correctedTiw并将其赋值给这个关键帧的mTcwMerge
+					4.5 遍历当前关键帧窗口中的地图点：
+						5.1 如果地图点为空或者为bad，那么直接删除spLocalWindowMPs中的这个地图点
+						5.2 如果这个地图点的参考关键帧不在vCorrectedSim3中，说明这个地图点不是由当前关键帧的窗口中的关键帧生成的，直接删除spLocalWindowMPs中的这个地图点，此时numPointsWithCorrection递增1
+						5.3 获取地图点的参考关键帧对应的g2oCorrectedSwi和g2oNonCorrectedSiw，然后将这个地图点的世界系坐标按照pw→利用g2oNonCorrectedSiw投影到参考系下→利用g2oCorrectedSwi计算到融合关键帧的世界系下；地图点的方向也按照类似的思路进行更新
+					4.6 遍历当前关键帧窗口中的关键帧：设置这个关键帧的mTcwBefMerge和mTwcBefMerge，将mTcwMerge设置为位姿；修改这个关键帧的地图，记录mnMergeCorrectedForKF，在融合关键帧的地图中添加这个关键帧，在当前关键帧的地图中删除这个关键帧
+					4.7 遍历当前关键帧窗口中的地图点：设置世界系坐标为mPosMerge，设置normal为mNormalVectorMerge，设置地图为融合关键帧的地图，在融合关键帧的地图中添加这个地图点，在当前关键帧的地图中删除这个地图点
+					4.8 在mpAtlas中记录融合关键帧的地图经过了更改，设置当前关键帧的地图为bad，融合关键帧的地图的修改次数递增1，并将其ID修改为当前关键帧的地图的ID
+					4.9 类似MergeLocal2中的方式融合当前关键帧的地图和融合关键帧的地图的生成树；更新融合关键帧的连接关系
+					4.10 SearchAndFuse：将vpCheckFuseMapPoint中的地图点往vCorrectedSim3中的关键帧进行投影构建匹配，并对匹配的地图点进行融合，思路与上面的同名函数类似
+					4.11 对当前关键帧窗口的关键帧和融合关键帧窗口的关键帧都进行连接关系的更新；并将当前关键帧窗口中的关键帧copy到vpLocalCurrentWindowKFs中，将融合关键帧窗口中的关键帧copy到vpMergeConnectedKFs中，执行优化LocalBundleAdjustment（优化的是vpLocalCurrentWindowKFs，固定vpMergeConnectedKFs）；局部建图线程释放
+					4.12 获取当前关键帧的地图中的所有关键帧vpCurrentMapKFs（这里已经不包括当前关键帧窗口中的关键帧了，因为他们的地图已经更改为融合关键帧的地图了）和当前关键帧的地图中所有的地图点vpCurrentMapMPs（这里也不包括当前关键帧窗口中的关键帧对应的地图点了，因为他们的地图已经更改为融合关键帧的地图了）：
+					4.13 如果是单目模式：
+						4.13.1 遍历vpCurrentMapKFs中的这些关键帧，依据这些关键帧与当前关键帧的相对位姿以及mg2oMergeScw更新这些关键帧的位姿，并记录每个关键帧的mfScale、mTcwBefMerge和mTwcBefMerge
+						4.13.2 遍历vpCurrentMapMPs中的这些地图点，根据地图点的参考关键帧的位姿和矫正的位姿计算其新的世界系坐标，并更新UpdateNormalAndDepth
+					4.14 请求局部建图线程停止并等待局部建图线程停止；
+					4.15 如果不是单目模式：执行优化OptimizeEssentialGraph
+					4.16 遍历vpCurrentMapKFs中的关键帧，对每一个关键帧更改其地图，在当前关键帧地图中删除这个关键帧，将这个关键帧添加到融合关键帧地图中；遍历vpCurrentMapMPs中的地图点，对每一个地图点更改其地图，在当前关键帧的地图中删除这个地图点，将这个地图点添加到融合关键帧的地图中
+					4.17 释放局部建图线程mpLocalMapper->Release();
+					4.18 当前关键帧添加融合边；融合关键帧添加融合边；当前关键帧的地图和融合关键帧的地图的改变次数都递增1；mpAtlas删除坏的地图
+
+				5. 记录当前关键帧的时间戳到vdPR_CurrentTime中，记录融合关键帧的时间戳到vdPR_MatchedTime中，并记录位置识别的结果到vnPR_TypeRecogn中；mpMergeLastCurrentKF和mpMergeMatchedKF可以删除了，mnMergeNumCoincidences和mnMergeNumNotFound重置为0，mvpMergeMatchedMPs和mvpMergeMPs清空，mbMergeDetected设置为false
+
+				6. 如果此时还检测到回环，设置mpLoopLastCurrentKF和mpLoopMatchedKF可以删除，mnLoopNumCoincidences和mnLoopNumNotFound重置为0，mvpLoopMatchedMPs和mvpLoopMPs清空，mbLoopDetected为false；也就是在当前关键帧既检测到融合又检测到回环的时候，只执行融合，不执行回环
 
 
-		如果不是在IMU模式下，执行MergeLocal：将新的地图合并到旧的地图里面
-			1. 如果正在进行全局BA，那么就停止全局BA；局部建图线程暂停，等待局部建图线程停止；清空局部建图线程的关键帧；获取当前关键帧的地图pCurrentMap，获取合并关键帧的地图pMergeMap；更新当前关键帧的连接关系
-			2. 获取当前关键帧的窗口的关键帧spLocalWindowKFs：使用的循环获取指定数量的关键帧，避免关键帧的数量太少，并将这些关键帧的地图点全部添加到spLocalWindowMPs中
-			3. 与当前关键帧相同，获取融合关键帧的窗口的关键帧spMergeConnectedKFs以及这些关键帧对应的地图点spMapPointMerge，并将这些地图点copy到vpCheckFuseMapPoint中
-			4. 计算未矫正的位姿和已矫正的位姿：
-				4.1 获取当前关键帧的位姿添加到vNonCorrectedSim3中，获取mg2oMergeScw添加到vCorrectedSim3中
-				4.2 遍历当前关键帧窗口中的关键帧：
-					4.2.1 如果这个关键帧就是当前关键帧，那么直接获取g2oCorrectedSiw=g2oCorrectedScw，否则
-					4.2.2 获取这个关键帧的位姿添加到vNonCorrectedSim3中，计算当前关键帧到这个关键帧的位姿，再使用世界到当前关键帧的sim3位姿，计算世界到这个关键帧的sim3位姿g2oCorrectedSiw，并添加到vCorrectedSim3中
-					4.2.3 将g2oCorrectedSiw的尺度赋值给这个关键帧的mfScale，去除g2oCorrectedSiw的尺度计算得到correctedTiw并将其赋值给这个关键帧的mTcwMerge
-			5. 遍历当前关键帧窗口中的地图点：
-				5.1 如果地图点为空或者为bad，那么直接删除spLocalWindowMPs中的这个地图点
-				5.2 如果这个地图点的参考关键帧不在vCorrectedSim3中，说明这个地图点不是由当前关键帧的窗口中的关键帧生成的，直接删除spLocalWindowMPs中的这个地图点，此时numPointsWithCorrection递增1
-				5.3 获取地图点的参考关键帧对应的g2oCorrectedSwi和g2oNonCorrectedSiw，然后将这个地图点的世界系坐标按照pw→利用g2oNonCorrectedSiw投影到参考系下→利用g2oCorrectedSwi计算到融合关键帧的世界系下；地图点的方向也按照类似的思路进行更新
-			6. 遍历当前关键帧窗口中的关键帧：设置这个关键帧的mTcwBefMerge和mTwcBefMerge，将mTcwMerge设置为位姿；修改这个关键帧的地图，记录mnMergeCorrectedForKF，在融合关键帧的地图中添加这个关键帧，在当前关键帧的地图中删除这个关键帧
-			7. 遍历当前关键帧窗口中的地图点：设置世界系坐标为mPosMerge，设置normal为mNormalVectorMerge，设置地图为融合关键帧的地图，在融合关键帧的地图中添加这个地图点，在当前关键帧的地图中删除这个地图点
-			8. 在mpAtlas中记录融合关键帧的地图经过了更改，设置当前关键帧的地图为bad，融合关键帧的地图的修改次数递增1，并将其ID修改为当前关键帧的地图的ID
-			9. 类似MergeLocal2中的方式融合当前关键帧的地图和融合关键帧的地图的生成树；更新融合关键帧的连接关系
-			10. SearchAndFuse：将vpCheckFuseMapPoint中的地图点往vCorrectedSim3中的关键帧进行投影构建匹配，并对匹配的地图点进行融合，思路与上面的同名函数类似
-			11. 对当前关键帧窗口的关键帧和融合关键帧窗口的关键帧都进行连接关系的更新；并将当前关键帧窗口中的关键帧copy到vpLocalCurrentWindowKFs中，将融合关键帧窗口中的关键帧copy到vpMergeConnectedKFs中，执行优化LocalBundleAdjustment（优化的是vpLocalCurrentWindowKFs，固定vpMergeConnectedKFs）；局部建图线程释放
-			12. 获取当前关键帧的地图中的所有关键帧vpCurrentMapKFs（这里已经不包括当前关键帧窗口中的关键帧了，因为他们的地图已经更改为融合关键帧的地图了）和当前关键帧的地图中所有的地图点vpCurrentMapMPs（这里也不包括当前关键帧窗口中的关键帧对应的地图点了，因为他们的地图已经更改为融合关键帧的地图了）：
-			13. 如果是单目模式：
-				13.1 遍历vpCurrentMapKFs中的这些关键帧，依据这些关键帧与当前关键帧的相对位姿以及mg2oMergeScw更新这些关键帧的位姿，并记录每个关键帧的mfScale、mTcwBefMerge和mTwcBefMerge
-				13.2 遍历vpCurrentMapMPs中的这些地图点，根据地图点的参考关键帧的位姿和矫正的位姿计算其新的世界系坐标，并更新UpdateNormalAndDepth
-			14. 请求局部建图线程停止并等待局部建图线程停止；
-			15. 如果不是单目模式：执行优化OptimizeEssentialGraph
-			16. 遍历vpCurrentMapKFs中的关键帧，对每一个关键帧更改其地图，在当前关键帧地图中删除这个关键帧，将这个关键帧添加到融合关键帧地图中；遍历vpCurrentMapMPs中的地图点，对每一个地图点更改其地图，在当前关键帧的地图中删除这个地图点，将这个地图点添加到融合关键帧的地图中
-			17. 释放局部建图线程mpLocalMapper->Release();
-			18. 当前关键帧添加融合边；融合关键帧添加融合边；当前关键帧的地图和融合关键帧的地图的改变次数都递增1；mpAtlas删除坏的地图
+			7.6.3 如果mbLoopDetected为true
+				1. 记录当前关键帧的时间戳到vdPR_CurrentTime中，记录闭环关键帧的时间戳到vdPR_MatchedTime，并记录位置识别的结果到vnPR_TypeRecogn中；更新mg2oLoopScw=mg2oLoopSlw；
+				2. 如果当前关键帧的地图是惯性模式，那么：
+					2.1 计算闭环关键帧对应的世界系到当前关键帧对应的世界系之间的变换g2oSww_new（闭环关键帧的世界到当前关键帧的世界），计算方法类似于地图合并中的计算，利用了回环关键帧到当前关键帧之间的相似变换
+					2.2 计算g2oSww_new中的旋转对应的轴角，如果pitch和roll很小，而yaw比较小的话，就继续执行以下，否则，跳到2.3
+						2.2.1 此处的判断的合理性在于：尺度漂移在pitch和roll方向上计划没有，在yaw方向比较大；实际上，载体在运行的时候，由于重力的影响，yaw方向的运动自由度会远远大于pitch和roll方向，所以此处的判断是合理的
+						2.2.2 如果当前关键帧的地图是惯性模式（此处的判断纯属多于，因为，外面的if语句已经判断了）：如果在IMU模式下，并且当前关键帧的地图已经经过了第三阶段初始化，那么令pitch和roll为0，也就是认为尺度漂移只可能发生在yaw上，这样做也是合理的，毕竟只有yaw方向的运动是不受重力制约的；
+						2.2.3 利用新的重新计算g2oSww_new（注意此时的尺度令为1了）；并利用更新的g2oSww_new重新计算mg2oLoopScw（闭环关键帧的世界到当前关键帧）
+					2.3 认为获取的回环很糟糕，并令bGoodLoop为false
+				3. 如果bGoodLoop为true：
+					3.1 mvpLoopMapPoints=mvpLoopMPs
+					3.2 CorrectLoop：
+						3.2.1 局部建图线程请求停止，并清空关键帧（实际上是处理完关键帧）；如果正在进行全局BA，那么就停止全局BA；局部建图线程暂停，等待局部建图线程停止；更新当前关键帧的连接关系
+						3.2.2 获取当前关键帧及其共视关键帧mvpCurrentConnectedKFs，并计算NonCorrectedSim3和CorrectedSim3，设置当前关键帧的位姿（使用CorrectedSim3中的位姿，并去除尺度）；遍历mvpCurrentConnectedKFs，计算CorrectedSim3和NonCorrectedSim3，并设置关键帧的位姿（使用CorrectedSim3中的位姿，并去除尺度）；遍历CorrectedSim3，并获取其键值对的关键帧，然后获取每一个关键帧的地图点，然后矫正这些地图点的世界系坐标和UpdateNormalAndDepth；如果是IMU模式，那么更新关键帧的速度（注意这里只是将其变换到回环关键帧的世界系下，没有更新尺度）；更新关键帧的连接关系
+						3.2.3 当前关键帧对应的地图的变化次数递增1；检查当前关键帧的地图点与回环关键帧的地图点是否有冲突：如果同一个特征点对应有两个地图点，那么就用回环关键帧的地图点替换掉当前关键帧的地图点，如果没有冲突，那么就在当前关键帧中添加回环关键帧对应的地图点，并对这个地图点添加当前关键帧的观测并重新计算描述子
+						3.2.4 SearchAndFuse：参数为CorrectedSim3和mvpLoopMapPoints，逻辑与上面的同名函数基本相同
+						3.2.5 存储因为闭环地图点调整而新生成的连接关系LoopConnections：
+							1. 遍历mvpCurrentConnectedKFs，获取每个关键这的共视关键帧（此时还没有更新连接关系），更新这个关键帧的连接关系，记录这个关键帧的连接关键帧信息到LoopConnections中
+							2. 遍历这个关键帧的共视关键帧，并从LoopConnections中将其删除
+							3. 遍历mvpCurrentConnectedKFs，并从LoopConnections中将其删除
+						3.2.6 如果是IMU单目模式并且没有经过第三阶段初始化，那么bFixedScale为false，否则bFixedScale=mbFixScale
+						3.2.7 如果是IMU模式，并且已经经过了第一阶段初始化，那么执行OptimizeEssentialGraph4DoF；否则，执行OptimizeEssentialGraph
+						3.2.8 mpAtlas记录产生了一次大的改变；回环关键帧记录回环边，当前关键帧记录回环边；
+						3.2.9 条件1：当前关键帧的地图没有经过IMU初始化；条件2：当前关键帧的地图中的关键帧的数目少于200并且mpAtlas中只有一个地图，那么，mbRunningGBA为true，mbFinishedGBA为false，mbStopGBA为false，mnCorrectionGBA=mnNumCorrection，并执行线程mpThreadGBA，其中执行函数RunGlobalBundleAdjustment
+							1. 如果没有经过IMU第一阶段的初始化，那么执行GlobalBundleAdjustemnt，否则执行FullInertialBA
+							2. 如果mbStopGBA为false：
+								2.1 请求局部建图线程停止，并sleep到局部建图线程停止
+								2.2 使用树结构遍历所有的关键帧，对于某个关键帧pKF而言，获取其子关键帧；如果这个关键帧没有经过优化，那么利用父关键帧的mTcwGBA记录（不是更新，子关键帧也会有称为父关键帧的时候，那时候会更新相关信息）子关键帧的位姿，并更新子关键帧的速度、零偏
+								2.3 更新pKF的位姿，如果是imu模式，那么更新其速度和零偏
+								2.4 获取当前关键帧的地图中所有的地图点，如果地图经过了BA，那么世界设置其世界系坐标；否则，获取地图点的参考关键帧，并利用参考关键帧的更新前后的位姿计算新的世界系坐标并更新
+								2.5 记录当前关键帧的地图发生了很大的改变，地图改变的次数递增；释放局部建图线程Release
+							3. mbFinishedGBA和mbRunningGBA设置为true
+						3.2.10 释放局部建图线程Release，mLastLoopKFid更新为当前关键帧的id
+					3.3 mnNumCorrection递增1
 
+				4 设置mpLoopLastCurrentKF和mpLoopMatchedKF可以删除，mnLoopNumCoincidences和mnLoopNumNotFound重置为0，mvpLoopMatchedMPs和mvpLoopMPs清空，mbLoopDetected为false
 
+		7.7 更新上一关键帧为当前关键帧
 
+		7.8 ResetIfRequested:
+			7.8.1如果mbResetRequested为true：清空mlpLoopKeyFrameQueue，mLastLoopKFid设置为0，mbResetRequested和mbResetActiveMapRequested为false
+			7.8.2 如果mbResetRequested为false，并且mbResetActiveMapRequested为投入：
+				1. 遍历mlpLoopKeyFrameQueue，如果某关键帧的地图是mpMapToReset，那么就将这一关键帧从mlpLoopKeyFrameQueue删除
+				2. mLastLoopKFid设置为mpAtlas->GetLastInitKFid()，mbResetActiveMapRequested设置为false
 
-		记录当前关键帧的时间戳到vdPR_CurrentTime中，记录融合关键帧的时间戳到vdPR_MatchedTime中，并记录位置识别的结果到vnPR_TypeRecogn中；mpMergeLastCurrentKF和mpMergeMatchedKF可以删除了，mnMergeNumCoincidences和mnMergeNumNotFound重置为0，mvpMergeMatchedMPs和mvpMergeMPs清空，mbMergeDetected设置为false
+		7.9 如果CheckFinish（返回mbFinishRequested）为true，就跳出循环，否则就sleep(5000)
 
-		如果此时还检测到回环，设置mpLoopLastCurrentKF和mpLoopMatchedKF可以删除，mnLoopNumCoincidences和mnLoopNumNotFound重置为0，mvpLoopMatchedMPs和mvpLoopMPs清空，mbLoopDetected为false；也就是在当前关键帧既检测到融合又检测到回环的时候，只执行融合，不执行回环
-
-
-		如果检测到回环：
-			1. 记录当前关键帧的时间戳到vdPR_CurrentTime中，记录闭环关键帧的时间戳到vdPR_MatchedTime，并记录位置识别的结果到vnPR_TypeRecogn中；更新mg2oLoopScw=mg2oLoopSlw；
-			2. 如果当前关键帧的地图是惯性模式，那么：
-				2.1 计算闭环关键帧对应的世界系到当前关键帧对应的世界系之间的变换g2oSww_new（闭环关键帧的世界到当前关键帧的世界），计算方法类似于地图合并中的计算，利用了回环关键帧到当前关键帧之间的相似变换
-				2.2 计算g2oSww_new中的旋转对应的轴角，如果pitch和roll很小，而yaw比较小的话，就继续执行以下，否则，跳到2.3
-					2.2.1 此处的判断的合理性在于：尺度漂移在pitch和roll方向上计划没有，在yaw方向比较大；实际上，载体在运行的时候，由于重力的影响，yaw方向的运动自由度会远远大于pitch和roll方向，所以此处的判断是合理的
-					2.2.2 如果当前关键帧的地图是惯性模式（此处的判断纯属多于，因为，外面的if语句已经判断了）：如果在IMU模式下，并且当前关键帧的地图已经经过了第三阶段初始化，那么令pitch和roll为0，也就是认为尺度漂移只可能发生在yaw上，这样做也是合理的，毕竟只有yaw方向的运动是不受重力制约的；
-					2.2.3 利用新的重新计算g2oSww_new（注意此时的尺度令为1了）；并利用更新的g2oSww_new重新计算mg2oLoopScw（闭环关键帧的世界到当前关键帧）
-				2.3 认为获取的回环很糟糕，并令bGoodLoop为false
-			3. 如果bGoodLoop为true：
-				3.1 mvpLoopMapPoints=mvpLoopMPs
-				3.2 CorrectLoop：
-					3.2.1 局部建图线程请求停止，并清空关键帧（实际上是处理完关键帧）；如果正在进行全局BA，那么就停止全局BA；局部建图线程暂停，等待局部建图线程停止；更新当前关键帧的连接关系
-					3.2.2 获取当前关键帧及其共视关键帧mvpCurrentConnectedKFs，并计算NonCorrectedSim3和CorrectedSim3，设置当前关键帧的位姿（使用CorrectedSim3中的位姿，并去除尺度）；遍历mvpCurrentConnectedKFs，计算CorrectedSim3和NonCorrectedSim3，并设置关键帧的位姿（使用CorrectedSim3中的位姿，并去除尺度）；遍历CorrectedSim3，并获取其键值对的关键帧，然后获取每一个关键帧的地图点，然后矫正这些地图点的世界系坐标和UpdateNormalAndDepth；如果是IMU模式，那么更新关键帧的速度（注意这里只是将其变换到回环关键帧的世界系下，没有更新尺度）；更新关键帧的连接关系
-					3.2.3 当前关键帧对应的地图的变化次数递增1；检查当前关键帧的地图点与回环关键帧的地图点是否有冲突：如果同一个特征点对应有两个地图点，那么就用回环关键帧的地图点替换掉当前关键帧的地图点，如果没有冲突，那么就在当前关键帧中添加回环关键帧对应的地图点，并对这个地图点添加当前关键帧的观测并重新计算描述子
-					3.2.4 SearchAndFuse：参数为CorrectedSim3和mvpLoopMapPoints，逻辑与上面的同名函数基本相同
-					3.2.5 存储因为闭环地图点调整而新生成的连接关系LoopConnections：
-						1. 遍历mvpCurrentConnectedKFs，获取每个关键这的共视关键帧（此时还没有更新连接关系），更新这个关键帧的连接关系，记录这个关键帧的连接关键帧信息到LoopConnections中
-						2. 遍历这个关键帧的共视关键帧，并从LoopConnections中将其删除
-						3. 遍历mvpCurrentConnectedKFs，并从LoopConnections中将其删除
-					3.2.6 如果是IMU单目模式并且没有经过第三阶段初始化，那么bFixedScale为false，否则bFixedScale=mbFixScale
-					3.2.7 如果是IMU模式，并且已经经过了第一阶段初始化，那么执行OptimizeEssentialGraph4DoF；否则，执行OptimizeEssentialGraph
-					3.2.8 mpAtlas记录产生了一次大的改变；回环关键帧记录回环边，当前关键帧记录回环边；
-					3.2.9 条件1：当前关键帧的地图没有经过IMU初始化；条件2：当前关键帧的地图中的关键帧的数目少于200并且mpAtlas中只有一个地图，那么，mbRunningGBA为true，mbFinishedGBA为false，mbStopGBA为false，mnCorrectionGBA=mnNumCorrection，并执行线程mpThreadGBA，其中执行函数RunGlobalBundleAdjustment
-						1. 如果没有经过IMU第一阶段的初始化，那么执行GlobalBundleAdjustemnt，否则执行FullInertialBA
-						2. 如果mbStopGBA为false：
-							2.1 请求局部建图线程停止，并sleep到局部建图线程停止
-							2.2 使用树结构遍历所有的关键帧，对于某个关键帧pKF而言，获取其子关键帧；如果这个关键帧没有经过优化，那么利用父关键帧的mTcwGBA记录（不是更新，子关键帧也会有称为父关键帧的时候，那时候会更新相关信息）子关键帧的位姿，并更新子关键帧的速度、零偏
-							2.3 更新pKF的位姿，如果是imu模式，那么更新其速度和零偏
-							2.4 获取当前关键帧的地图中所有的地图点，如果地图经过了BA，那么世界设置其世界系坐标；否则，获取地图点的参考关键帧，并利用参考关键帧的更新前后的位姿计算新的世界系坐标并更新
-							2.5 记录当前关键帧的地图发生了很大的改变，地图改变的次数递增；释放局部建图线程Release
-						3. mbFinishedGBA和mbRunningGBA设置为true
-					3.2.10 释放局部建图线程Release，mLastLoopKFid更新为当前关键帧的id
-
-
-
-
-
-				3.3 mnNumCorrection递增1
-			4. 设置mpLoopLastCurrentKF和mpLoopMatchedKF可以删除，mnLoopNumCoincidences和mnLoopNumNotFound重置为0，mvpLoopMatchedMPs和mvpLoopMPs清空，mbLoopDetected为false
-
-		
-
-		更新上一关键帧为当前关键帧
-
-
-	ResetIfRequested:
-		如果mbResetRequested为true：清空mlpLoopKeyFrameQueue，mLastLoopKFid设置为0，mbResetRequested和mbResetActiveMapRequested为false
-		如果mbResetRequested为false，并且mbResetActiveMapRequested为投入：
-			1. 遍历mlpLoopKeyFrameQueue，如果某关键帧的地图是mpMapToReset，那么就将这一关键帧从mlpLoopKeyFrameQueue删除
-			2. mLastLoopKFid设置为mpAtlas->GetLastInitKFid()，mbResetActiveMapRequested设置为false
-
-	如果CheckFinish（返回mbFinishRequested）为true，就跳出循环，否则就sleep(5000)
-
-SetFinish: 设置mbFinished为true
+		7.10 SetFinish: 设置mbFinished为true
 
 
 	8. optimize:
@@ -598,12 +670,10 @@ SetFinish: 设置mbFinished为true
 			8.2.3 如果是在初始化里面调用的，就直接将优化后的结果更新到关键帧和地图点；如果是在回环里面调用的，保存优化结果到相关的变量，并不会直接更新地图点和关键帧的信息
 
 		8.3 Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const long unsigned int nLoopId, bool *pbStopFlag, bool bInit, float priorG, float priorA, Eigen::VectorXd *vSingVal, bool *bHess)
-			8.3.1 
+			8.3.1
 
 
 
-
-git: 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
 
 
 

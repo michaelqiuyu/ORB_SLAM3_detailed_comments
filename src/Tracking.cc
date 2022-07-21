@@ -2007,6 +2007,7 @@ void Tracking::Track()
     if (bStepByStep)
     {
         std::cout << "Tracking: Waiting to the next step" << std::endl;
+        // 初始化mbStep为false，在view.cc中menuStep一旦直行就会变为true
         while(!mbStep && bStepByStep)
             usleep(500);
         mbStep = false;
