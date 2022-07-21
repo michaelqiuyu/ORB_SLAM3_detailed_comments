@@ -256,11 +256,11 @@ void EdgeSE3ProjectXYZToBody::linearizeOplus()
         -z, 0.f, x, 0.f, 1.f, 0.f,
         y, -x, 0.f, 0.f, 0.f, 1.f;
     /*
-        注意这里是对李代数求导，ρlw != tlw 所以不能使用Pl = Rlw*Pw + tlw
-        Pl = EXP(ξlw)*Pw    Pr = Rrl * EXP(ξlw) * Pw + trl
-        让Pr 对 ξlw 求雅克比
-        相当于Rrl*(Pl 对 ξlw的雅克比)
-        */
+    注意这里是对李代数求导，ρlw != tlw 所以不能使用Pl = Rlw*Pw + tlw
+    Pl = EXP(ξlw)*Pw    Pr = Rrl * EXP(ξlw) * Pw + trl
+    让Pr 对 ξlw 求雅克比
+    相当于Rrl*(Pl 对 ξlw的雅克比)
+    */
     _jacobianOplusXj = -pCamera->projectJac(X_r) * mTrl.rotation().toRotationMatrix() * SE3deriv;
 }
 

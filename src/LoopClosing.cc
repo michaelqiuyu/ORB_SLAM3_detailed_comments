@@ -187,8 +187,8 @@ void LoopClosing::Run()
                             // 通过物理约束来保证两个坐标轴都是水平的
                             /**
                              * notes:
-                             *      1. 场景较小的时候，假设重力的大小和方向都不发生变化
-                             *      2. IMU模式下，世界系都是重力对应的世界系，因此，如果假设重力是不变的，那么两个坐标系的Z轴必然平行，也就是XOY平面平行
+                             *      1. 场景较小的时候，假设重力的大小和方向都不发生变化，因此，两个世界系的Z轴方向是一致的，两个世界系之间只会有yaw角不同
+                             *      2. IMU模式下，世界系都是重力对应的世界系，因此，如果假设重力是不变的，那么两个坐标系的Z轴必然平行
                              *      3. 在这种假设下，两个世界系的相对变换的轴角的方向就必然是Z轴方向了
                              */
                             if ((mpTracker->mSensor==System::IMU_MONOCULAR ||mpTracker->mSensor==System::IMU_STEREO) &&
@@ -197,6 +197,7 @@ void LoopClosing::Run()
                                 Eigen::Vector3d phi = LogSO3(mSold_new.rotation().toRotationMatrix());
                                 phi(0)=0;
                                 phi(1)=0;
+                                // 尺度也设置为1了
                                 mSold_new = g2o::Sim3(ExpSO3(phi),mSold_new.translation(),1.0);
                             }
                         }
@@ -205,7 +206,7 @@ void LoopClosing::Run()
                         mg2oMergeSmw = gSmw2 * gSw2c * gScw1;
 
                         // 更新mg2oMergeScw
-                        // notes: 上面的注释也不准确，这里赋值，mg2oMergeSlw实际上保存的也就是世界到当前关键帧的变换
+                        // notes: 上面的注释也不准确，这里赋值，mg2oMergeSlw实际上保存的也就是世界到当前关键帧的变换，这个变换是通过融合关键帧实现的
                         mg2oMergeScw = mg2oMergeSlw;
 
                         //mpTracker->SetStepByStep(true);
@@ -288,21 +289,22 @@ void LoopClosing::Run()
 
                         // mg2oLoopScw是通过回环检测的Sim3计算出的回环矫正后的当前关键帧的初始位姿, Twc是当前关键帧回环矫正前的位姿.
                         // g2oSww_new 可以理解为correction
-                        // xc's todo: 为什么只在IMU模式下做这种处理？IMU到底产生了什么影响
-                        g2o::Sim3 g2oSww_new = g2oTwc*mg2oLoopScw;  // 如果没有尺度漂移，这个结果为单位阵
+                        // xc's todo: 为什么只在IMU模式下做这种处理？IMU到底产生了什么影响：IMU模式下，世界系的Z轴会对应到重力方向，因此使得pitch和roll可观
+                        g2o::Sim3 g2oSww_new = g2oTwc*mg2oLoopScw;  // 如果没有尺度漂移，这个结果为单位阵，与地图合并的情形不同
 
                         // 拿到 roll ,pitch ,yaw
                         Eigen::Vector3d phi = LogSO3(g2oSww_new.rotation().toRotationMatrix());
                         cout << "phi = " << phi.transpose() << endl;
                         /**
                          * notes:
-                         *      1. IMU模式下，回到原来的
+                         *      1. 此处实际上认为尺度漂移在pitch和roll方向上几乎没有，在yaw方向比较大
+                         *      2. 实际上，载体在运行的时候，由于重力的影响，yaw方向的运动自由度会远远大于pitch和roll方向，所以此处的判断是合理的
                          */
                         // 这里算是通过imu重力方向验证回环结果, 如果pitch或roll角度偏差稍微有一点大,则回环失败. 对yaw容忍比较大(20度)
                         if (fabs(phi(0))<0.008f && fabs(phi(1))<0.008f && fabs(phi(2))<0.349f)
                         {
                             // 如果是imu模式
-                            if(mpCurrentKF->GetMap()->IsInertial())
+                            if(mpCurrentKF->GetMap()->IsInertial())  // 此处的判断有些多于，因为外面的if已经进行过这个判断了
                             {
                                 // If inertial, force only yaw
                                 // 如果是imu模式,强制将焊接变换的的 roll 和 pitch 设为0
@@ -311,6 +313,7 @@ void LoopClosing::Run()
                                 {
                                     phi(0)=0;
                                     phi(1)=0;
+                                    // 尺度也设置为1了
                                     g2oSww_new = g2o::Sim3(ExpSO3(phi),g2oSww_new.translation(),1.0);
                                     /**
                                      * notes:
@@ -1502,6 +1505,7 @@ void LoopClosing::CorrectLoop()
             // Correct velocity according to orientation correction
             if(bImuInit)
             {
+                // 没有更新尺度
                 Eigen::Quaternionf Rcor = (g2oCorrectedSiw.rotation().inverse()*g2oSiw.rotation()).cast<float>();
                 pKFi->SetVelocity(Rcor*pKFi->GetVelocity());
             }
@@ -2022,9 +2026,9 @@ void LoopClosing::MergeLocal()
         // 再转换到矫正后的初始坐标系中
         /**
          * NOTES:
-         *      1. 尺度变化由位姿漂移导致的
-         *      2. 地图点是关键帧三角化得到，得到的都是关键帧相机系下的坐标，没有尺度，也就是说相机系下的地图点没有尺度问题
-         *      3. P’ = Swc’ * Tcw * P → Scw’ * P’ = Tcw * P；保证地图点和位姿矫正后投影的像素坐标不变
+         *      1. 地图点是关键帧三角化得到，得到的都是关键帧相机系下的坐标，没有尺度，也就是说相机系下的地图点没有尺度问题
+         *      2. P’ = Swc’ * Tcw * P → Scw’ * P’ = Tcw * P；保证地图点和位姿矫正后投影的像素坐标不变
+         *      3. 这里计算得到的是在融合关键帧的世界系下的位置
          */
         Eigen::Vector3d eigCorrectedP3Dw = g2oCorrectedSwi.map(g2oNonCorrectedSiw.map(P3Dw));
         // 计算旋转部分的变化
@@ -2037,7 +2041,10 @@ void LoopClosing::MergeLocal()
          * notes:
          *      1. 跟上面矫正地图点的方式是一致的
          *      2. pMPi->mNormalVectorMerge = g2oCorrectedSwi.rotation() * g2oNonCorrectedSiw.rotation() * pMPi->GetNormal()
-         *      3. 都是先变换到相机系下然后再变换到矫正的世界系下
+         *      3. 都是先变换到相机系下然后再变换到矫正的世界系下，也就是融合的关键帧的世界系
+         *      4. 对向量而言，只有旋转，不会有平移（两个点都有平移，计算向量的时候就没有了）：
+         *          y1 = sR1(R2x1 + t2) + t1, y2 = sR1(R2x2 + t2) + t1, 那么y2 - y1 = sR1R2(x2 - x1),
+         *          x2 - x1就是原来的Normal，由于只需要方向的单位向量，因此s也是不需要的
          */
         pMPi->mNormalVectorMerge = Rcor.cast<float>() * pMPi->GetNormal();
 
@@ -3024,6 +3031,7 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
         if(idx!=mnFullBAIdx)
             return;
 
+        // xc's todo: 在优化之前没有IMU初始化，优化后IMU初始化了
         if(!bImuInit && pActiveMap->isImuInitialized())
             return;
 

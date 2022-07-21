@@ -76,8 +76,13 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
     optimizer.setAlgorithm(solver);
     optimizer.setVerbose(false);
 
+    /**
+     * optimizer.terminate()返回的就是_forceStopFlag
+     *
+     * 在优化函数的迭代过程中，optimizer.terminate()可以控制迭代的次数；由于使用的是do...while结构，因此只会迭代计算一次
+     */
     if(pbStopFlag)
-        optimizer.setForceStopFlag(pbStopFlag);
+        optimizer.setForceStopFlag(pbStopFlag);  // 不迭代就停止
 
     long unsigned int maxKFid = 0;
 
@@ -189,7 +194,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                 vpEdgeKFMono.push_back(pKF);
                 vpMapPointEdgeMono.push_back(pMP);
             }
-            else if(leftIndex != -1 && pKF->mvuRight[leftIndex] >= 0) //Stereo observation
+            else if(leftIndex != -1 && pKF->mvuRight[leftIndex] >= 0) //Stereo observation，左右目
             {
                 const cv::KeyPoint &kpUn = pKF->mvKeysUn[leftIndex];
 
@@ -226,7 +231,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
                 vpMapPointEdgeStereo.push_back(pMP);
             }
 
-            if(pKF->mpCamera2){
+            if(pKF->mpCamera2){  // 鱼眼非左右目的形式
                 int rightIndex = get<1>(mit->second);
 
                 if(rightIndex != -1 && rightIndex < pKF->mvKeysRight.size()){
@@ -290,9 +295,12 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
         g2o::VertexSE3Expmap* vSE3 = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(pKF->mnId));
 
         g2o::SE3Quat SE3quat = vSE3->estimate();
+        /**
+         * nLoopKF默认为0，在track下调用
+         */
         if(nLoopKF==pMap->GetOriginKF()->mnId)
         {
-            // 非回环调用
+            // 初始化成功后调用
             pKF->SetPose(Sophus::SE3f(SE3quat.rotation().cast<float>(), SE3quat.translation().cast<float>()));
         }
         else
@@ -382,7 +390,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
 
         if(nLoopKF==pMap->GetOriginKF()->mnId)
         {
-            // 非回环调用
+            // 初始化成功时候调用
             pMP->SetWorldPos(vPoint->estimate().cast<float>());
             pMP->UpdateNormalAndDepth();
         }
