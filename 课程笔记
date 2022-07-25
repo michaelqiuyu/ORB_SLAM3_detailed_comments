@@ -666,15 +666,121 @@
 
 		8.2 BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<MapPoint *> &vpMP, int nIterations, bool* pbStopFlag, const unsigned long nLoopKF, const bool bRobust)：
 			8.2.1 纯视觉的全局BA，构建地图点到图像的重投影误差进行优化；初始帧不优化
-			8.2.2 如果是左右目，残差的维度增加一个视差维度，由于ur=ul-fb/z，因此ur对x, y的导数等于ul对x, y的导数，ur对z的导数等于ul对z的导数加上fb/z**z；如果不是左右形式的双目，那么依据双目之间的外参Tlr并认为Tlr不变，构建重投影误差u=π(Trl * Tlw * Pw)
-			8.2.3 如果是在初始化里面调用的，就直接将优化后的结果更新到关键帧和地图点；如果是在回环里面调用的，保存优化结果到相关的变量，并不会直接更新地图点和关键帧的信息
+			8.2.2 函数调用时机：
+				1. 初始化阶段：直接将优化后的结果更新到关键帧和地图点；
+				2. 回环阶段：保存优化结果到相关的变量，并不会直接更新地图点和关键帧的信息
+			8.2.3 如果是左右目，残差的维度增加一个视差维度，由于ur=ul-fb/z，因此ur对x, y的导数等于ul对x, y的导数，ur对z的导数等于ul对z的导数加上fb/z**z；如果不是左右形式的双目，那么依据双目之间的外参Tlr并认为Tlr不变，构建重投影误差u=π(Trl * Tlw * Pw)
 
 		8.3 Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const long unsigned int nLoopId, bool *pbStopFlag, bool bInit, float priorG, float priorA, Eigen::VectorXd *vSingVal, bool *bHess)
-			8.3.1
+			8.3.1 全局惯性BA，获取给定地图中的所有关键帧和地图点；构建残差有重投影误差、预积分构建的残差、限制零偏波动的残差；vSingVal和bHess没有作用
+			8.3.2 函数调用时机：nLoopId的默认值为0，但是从调用看，其不可能为0；bFixLocal为false
+				1. IMU初始化阶段：pbStopFlag为false
+					1.1 IMU第一、第二阶段初始化：第一阶段的priorG、priorA的值分别为1e2和1e10，第二阶段的priorG、priorA的值分别为1和1e5；bInit为true
+					1.2 IMU第三阶段初始化：此时使用默认值，priorG、priorA的值分别为1e2和1e6；bInit为false
+				2. 回环阶段：经由LoopClosing::RunGlobalBundleAdjustment函数调用，全部使用默认值，bInit、priorG、priorA分别为false、1e2和1e6，pbStopFlag为mbStopGBA
+					2.1 纯视觉合并阶段MergeLocal
+					2.1 回环矫正阶段
+			8.3.3 对每一个关键帧添加位姿节点VertexPose，bFixLocal恒为false，因此顶点默认为不固定；如果是在IMU阶段，那么添加速度节点VertexVelocity；如果是在第三阶段初始化或者回环阶段，那么对每个关键帧都有陀螺仪零偏节点VertexGyroBias和加速度零偏节点VertexAccBias；如果是在第一、第二阶段IMU初始化，那么仅仅分别添加一个陀螺仪零偏节点VertexGyroBias和加速度零偏节点VertexAccBias
+			8.3.4 对关键帧，根据其前后两个关键帧，添加IMU预积分构建的残差的边EdgeInertial，如果在IMU第三阶段初始化或者回环阶段，那么还添加EdgeGyroRW（前后两个关键帧的陀螺仪零偏应该接近）和EdgeAccRW（前后两个关键帧的加速度零偏应该接近）；如果在IMU第一、第二阶段初始化，那么应该添加EdgePriorAcc和EdgePriorGyro（约束陀螺仪零偏和加速度零偏在0附近，注意，此时只有一个基啊速度零偏节点和一个陀螺仪零偏节点）；添加重投影误差的边，注意区分左右目的双目（残差维度为3）和非左右目的双目（多添加一个重投影误差的边）
+			8.3.5 遍历每一个关键帧，如果nLoopId为0，那么就直接更新相关信息，否则就将相关信息保存到mTcwGBA、mnBAGlobalForKF、mVwbGBA和mBiasGBA（包含陀螺仪零偏和加速度零偏）中；遍历地图点，如果nLoopId为0，那么就直接更新地图点的世界系坐标和方向深度等，否则就将相关信息保存到mPosGBA、mnBAGlobalForKF中
+
+		8.4 Optimizer::PoseOptimization(Frame *pFrame)
+			8.4.1 仅对给定的帧的位姿进行优化，不优化对应的地图点
+			8.4.2 函数调用时机：参考关键帧跟踪中、恒速模型跟踪中、没有IMU或者距离最近的重定位不远的时候的局部地图跟踪中、重定位中
+			8.4.3 构建重投影误差的边，注意区分左右目的双目（残差维度为3）和非左右目的双目（多添加一个重投影误差的边）
+			8.4.4 分四次进行优化，每次优化的时候都将初值复位（这样做的好处是防止前一步的优化将结果带偏），并计算outlier的边，这些边不参与下一次优化，并且只有前三次的优化使用RobustKernel（没有误差很大的边了）；最后将优化结果更新到Frame中即可
+
+		8.5 Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap, int& num_fixedKF, int& num_OptKF, int& num_MPs, int& num_edges)
+			8.5.1 对当前关键帧的共视窗口内的关键帧及其地图点进行优化
+			8.5.2 函数调用时机：局部建图线程视觉模式下
+			8.5.3 参数说明：num_fixedKF、num_OptKF和num_edges是返回参数，num_MPs没有作用
+			8.5.4 代码逻辑：
+				1. 获取当前关键帧的所有共视关键帧，并令共视关键帧的mnBALocalForKF为当前关键帧的ID，如果共视关键帧非坏且其的地图是当前关键帧的地图，那么将共视关键帧添加到lLocalKeyFrames中
+				2. 遍历lLocalKeyFrames中的关键帧，如果其是地图的初始关键帧，那么num_fixedKF；获取关键帧的所有地图点，并令每个地图点的mnBALocalForKF为当前关键帧的ID，并将这些地图点都添加到lLocalMapPoints中
+				3. 遍历lLocalMapPoints，找到地图点的观测关键帧中不是当前关键帧共视窗口中的关键帧，将这些关键帧的mnBAFixedForKF设置为当前关键帧的ID；并添加到lFixedCameras中；并对num_fixedKF=lFixedCameras.size()+num_fixedKF；如果num_fixedKF为0，那么地图会整体移动，不能优化，此时直接结束
+				4. 构建优化器，g2o::BlockSolver_6_3，并使用LM算法
+				5. 遍历lLocalKeyFrames，添加VertexSE3Expmap顶点，并设置其不固定（只要其不是地图的初始关键帧），并令num_OptKF为lLocalKeyFrames.size()；遍历lFixedCameras，添加VertexSE3Expmap顶点，设置其不优化
+				6. 添加重投影误差的边，注意区分左右目的双目（残差维度为3）和非左右目的双目（多添加一个重投影误差的边）；开始优化10次
+				7. 遍历边，找出其中残差大于阈值的边，并将其关键帧和地图点的pair添加到vToErase中；遍历vToErase，对关键帧，将这个地图点设置为NULL；对地图点，删除这个关键帧的观测
+				8. 将优化结果直接更新到关键帧和地图点
+				9. pMap->IncreaseChangeIndex()：地图的改变次数递增
+
+		8.6 Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* pCurKF,
+                                       const LoopClosing::KeyFrameAndPose &NonCorrectedSim3,
+                                       const LoopClosing::KeyFrameAndPose &CorrectedSim3,
+                                       const map<KeyFrame *, set<KeyFrame *> > &LoopConnections, const bool &bFixScale)
+            8.6.1 对当前地图中的所有的关键帧的位姿进行优化，没有地图点的顶点
+            8.6.2 函数调用时机：在CorrectLoop中调用，用于矫正累计漂移，
+            8.6.3 参数说明：
+            	1. pLoopKF：找到的回环关键帧；pCurKF：当前关键帧
+            	2. NonCorrectedSim3：还没有矫正的sim3位姿，尺度为1；CorrectedSim3：矫正的关键帧位姿sim3位姿，而且已经把去除尺度的位姿更新到关键帧里面了；注意NonCorrectedSim3和CorrectedSim3的键完全一样
+            	3. LoopConnections：存储因为闭环地图点调整而新生成的连接关系
+            8.6.4 代码逻辑：
+            	1. 构建优化器，使用g2o::BlockSolver_7_3，并使用LM算法，设置初始的lambda值为1e-16
+            	2. 对地图中的所有关键帧，构建VertexSim3Expmap，如果这个关键帧在CorrectedSim3中，就设置顶点初值为CorrectedSim3中的值，并将这个值保存在vScw中；如果这个关键帧不在CorrectedSim3中，就使用关键帧的位姿构建sim3（尺度为1），设置顶点初值为它，并将它添加到vScw中；如果这个关键帧是地图的初始关键帧，那么就固定它，否则不固定；需要注意的是，vScw中既有矫正的位姿，也有原始的位姿
+            	3. 构建以下5种边：所有边的information matrix都是7维的单位阵
+            		3.1 因为闭环而形成的边：遍历LoopConnections，构建因为回环导致产生连接从而形成的边；如果两个关键帧之间的权重比较小，那么只有其中一个是当前关键帧或者回环关键帧才会构建残差边；构建边的Siw一定在CorrectedSim3中（LoopConnections<CorrectedSim3），使用的一定是矫正的位姿，Sjw一定不在CorrectedSim3中，使用的是自身的位姿（回环关键帧的窗口的位姿认为没有漂移），边的观测使用的就是Sjw*Swi
+            		3.2 遍历地图中的所有关键帧，构建关键帧与其父关键帧构建的相对位姿的边，注意Siw和Sjw都是先在NonCorrectedSim3搜索，如果没有搜索到，就直接使用vScw中的关键帧，注意，这里的两个关键帧的位姿都是没有矫正的，有可能这个的关键帧与3.1中有重叠，但是，可能在3.1中使用的是矫正的位姿构建的边，在这里使用的是没有矫正的位姿构建的边
+            		3.3 地图中所有的回环匹配关系构建的边，注意Siw和Sjw都是先在NonCorrectedSim3搜索，如果没有搜索到，就直接使用vScw中的关键帧，注意，这里的两个关键帧的位姿都是没有矫正的
+            		3.4 共视关系构建的边：在这里要判断这里的两个关键帧不在3.1~3.3中，注意Siw和Sjw都是先在NonCorrectedSim3搜索，如果没有搜索到，就直接使用vScw中的关键帧，注意，这里的两个关键帧的位姿都是没有矫正的
+            		3.5 IMU模式下前后两个关键帧构建的边：注意Siw和Sjw都是先在NonCorrectedSim3搜索，如果没有搜索到，就直接使用vScw中的关键帧，注意，这里的两个关键帧的位姿都是没有矫正的
+            	4. 能够执行位姿图优化的原因：这里并没有其他传感器提供观测值，不符合常规的位姿图的构建方式
+            		1. 在这里的四种边（不含惯性）中，只有第一种LoopConnections的边使用了CorrectedSim3位姿，其余都是使用了原始位姿，也就是从Tcw计算得到的
+		            2. 在这里并没有引入额外的传感器信息，位子图优化能够进行下去的原因是有一些顶点，其与其他顶点构成边，而边的误差计算使用的顶点的sim3值是不同的
+		            3. 例如，O1 - O2 - O3 有三个顶点，其中O1 - O2是一条边，O2 - O3是一条边；在O1 - O2的观测计算的时候，O2的姿态使用的是
+		            CorrectedSim3中的值；而O2 - O3的观测计算的时候，O2的姿态使用的位姿是Tcw计算得到的
+		        5. 执行优化并迭代20次，得到优化后的结果
+		        6. 遍历关键帧，将优化结果直接更新到关键帧的位姿中；遍历地图点，如果地图点能够被当前关键帧的连接关键帧看到，那么使用看到这个地图点的关键帧来矫正地图点的世界系坐标，否则，就是用地图点的参考关键帧来矫正；矫正的思路是先变换到对应关键帧的原始相机系下，然后使用矫正的位姿变换到世界系下，并计算深度区间和方向
+		        7. pMap->IncreaseChangeIndex()：地图的改变次数递增
+
+		8.7 Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFixedKFs, vector<KeyFrame*> &vpFixedCorrectedKFs, vector<KeyFrame*> &vpNonFixedKFs, vector<MapPoint*> &vpNonCorrectedMPs)
+			8.7.1 在地图合并后，优化当前地图中不与merge地图有连接的所有关键帧的位姿
+			8.7.2 函数调用时机：纯视觉地图合并逻辑中MergeLocal
+			8.7.3 参数说明：
+				1. pCurKF：当前关键帧；vpFixedKFs：融合关键帧的窗口内的关键帧；vpFixedCorrectedKFs：当前关键帧共视窗口中的关键帧
+				2. vpNonFixedKFs：当前地图中的所有关键帧（后面会看到，碰到vpFixedCorrectedKFs中的关键帧会跳过）；vpNonCorrectedMPs：当前地图中的所有地图点
+			8.7.4 代码逻辑：
+				1. 构建优化器，使用g2o::BlockSolver_7_3，并使用LM算法，设置初始的lambda值为1e-16
+				2. 相关信息：
+					                 vpFixedKFs      vpFixedCorrectedKFs      vpNonFixedKFs
+				       vpGoodPose        true                 true                 false
+				       vpBadPose         false                true                 true
+				       vCorrectedSwc     true                 true                 false
+				       vScw              false                true                 true
+				2. 遍历vpFixedKFs，构建固定的顶点，使用的初值为关键帧的位姿，并将初值添加到vCorrectedSwc中；遍历vpFixedCorrectedKFs，构建固定的顶点，使用的初值是关键帧的位姿，并将初值添加到vCorrectedSwc中，并添加关键帧的mTcwBefMerge到vScw中，添加关键帧到sIdKF中；遍历vpNonFixedKFs，如果不是来自vpFixedCorrectedKFs，构建不固定的顶点，使用的初值是关键帧的位姿，并将初值添加到vScw中
+				3. 将vpFixedKFs、vpFixedCorrectedKFs和vpNonFixedKFs全部添加到vpKFs中，遍历vpKFs，添加3中边：两个关键帧必须都是来自vpKFs中，否则不构成边
+					3.1 构建父子节点的边：避免一个来自vpFixedKFs，一个来自vpNonFixedKFs；注意vpFixedKFs来自merge地图中，vpNonFixedKFs来自当前地图，而且两者之间没有关系，因此不要在这两个集合之间构建边；如果两个节点都是vpFixedCorrectedKFs或vpFixedKFs，那么使用vCorrectedSwc来构建观测Sji，如果两个节点都来自vpFixedCorrectedKFs或vpNonFixedKFs，那么使用vScw来构建观测Sji
+					3.2 地图中所有的回环匹配关系构建的边，如果两个节点都是vpFixedCorrectedKFs或vpFixedKFs，那么使用vCorrectedSwc来构建观测Sji，如果两个节点都来自vpFixedCorrectedKFs或vpNonFixedKFs，那么使用vScw来构建观测Sji
+					3.3 共视关系构建的边：如果两个节点都是vpFixedCorrectedKFs或vpFixedKFs，那么使用vCorrectedSwc来构建观测Sji，如果两个节点都来自vpFixedCorrectedKFs或vpNonFixedKFs，那么使用vScw来构建观测Sji
+				4. 能够执行位姿图优化的原因：这里并没有其他传感器提供观测值，不符合常规的位姿图的构建方式
+					1. 在这里有可能有O1 - O2 - O3，其中O1为vpFixedKFs，O2为vpFixedCorrectedKFs，O3为vpNonFixedKFs
+                    2. 那么对于O2而言，其与O1的边的观测计算使用的是矫正的位姿；其与O3的边的观测计算使用的是矫正前的位姿
+                5. 执行优化并迭代20次，得到优化后的结果
+                6. 遍历vpNonFixedKFs，将优化后的结果更新到关键帧的位姿中，并保存优化前的位姿到mTcwBefMerge和mTwcBefMerge中；遍历vpNonCorrectedMPs，首先通过循环的方式寻找参考关键帧（如果参考关键帧为bad，那么删除这个观测，重新获得参考关键帧，直至找到符合要求的参考关键帧），然后通过mTwcBefMerge先将地图点坐标转到原来的位姿下，然后使用更新后的位姿进行更新
+
+        8.8 Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &vpMatches1, g2o::Sim3 &g2oS12, const float th2, const bool bFixScale, Eigen::Matrix<double,7,7> &mAcumHessian, const bool bAllPoints)
+        	8.8.1 
+        	8.8.2 函数调用时机：
+        	8.8.3 参数说明：
+        	8.8.4 代码逻辑：
+        		1. 构建优化器，使用g2o::BlockSolverX，并使用LM算法
+
+            	
 
 
 
 
+
+
+
+
+
+
+后面需要做的有：
+	1. Robust Kernel的阈值的设置是残差维度的卡方分布0.95p值的数值，原因是什么？
+	2. IMU的世界系是什么，目前只知道Z轴是竖直向上的
+
+git: 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
 
 
 分辨率最好调到：640 * 480

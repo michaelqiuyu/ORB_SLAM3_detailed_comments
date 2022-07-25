@@ -496,9 +496,9 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
     }
 
     /**
-     * bInit    VP    VV    VG    VA
-     * false    k    3k+1  3k+2  3k+3
-     * true               4max+2 4max+3
+     * bInit    VP           VV             VG              VA
+     * false    k    maxKFid + 3k+1  maxKFid + 3k+2  maxKFid + 3k+3
+     * true                             4max + 2        4max + 3
      */
 
     // IMU links
@@ -572,7 +572,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
                 g2o::RobustKernelHuber* rki = new g2o::RobustKernelHuber;
                 ei->setRobustKernel(rki);
-                rki->setDelta(sqrt(16.92));
+                rki->setDelta(sqrt(16.92));  // 预积分构建的残差有9个维度，p值为0.95
 
                 optimizer.addEdge(ei);
 
@@ -762,6 +762,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
     optimizer.initializeOptimization();
     optimizer.optimize(its);
 
+    // 从代码逻辑看，nLoopId不可能为0，也就是不可能直接将优化后的结果更新，也就是结果都保存在一个变量里面，后续才会执行更新操作
 
     // Recover optimized data：回环调用则通过中间变量保存，否则直接更新
     //Keyframes
@@ -773,7 +774,6 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         VertexPose* VP = static_cast<VertexPose*>(optimizer.vertex(pKFi->mnId));
         if(nLoopId==0)
         {
-            // 回环调用
             Sophus::SE3f Tcw(VP->estimate().Rcw[0].cast<float>(), VP->estimate().tcw[0].cast<float>());
             pKFi->SetPose(Tcw);
         }
@@ -1079,7 +1079,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
 
             if(it==2)
-                // 除了前两次优化需要RobustKernel以外，后面的优化不需要了；认为后面的优化比较准了
+                // 除了前三次优化需要RobustKernel以外，后面的优化不需要了；认为后面的优化比较准了
                 // 实际上，位姿每次都是从同一个初值开始优化的，每次优化的区别在于，level=0的边不同
                 // 后面不需要RobustKernel可能是因为误差大的边都被设为level!=0了
                 e->setRobustKernel(0);
@@ -1213,6 +1213,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         {
             KeyFrame* pKFi = mit->first;
 
+            // mnBAFixedForKF用于防止将关键帧重复添加到lFixedCameras中
             if(pKFi->mnBALocalForKF!=pKF->mnId && pKFi->mnBAFixedForKF!=pKF->mnId )
             {                
                 pKFi->mnBAFixedForKF=pKF->mnId;
@@ -1290,6 +1291,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
     // Set MapPoint vertices
     const int nExpectedSize = (lLocalKeyFrames.size()+lFixedCameras.size())*lLocalMapPoints.size();
 
+    // 提前reserve，避免反复开辟内存，加快运行速度
     vector<ORB_SLAM3::EdgeSE3ProjectXYZ*> vpEdgesMono;
     vpEdgesMono.reserve(nExpectedSize);
 
@@ -1556,7 +1558,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
     /**
      * notes:
      *      1. NonCorrectedSim3与CorrectedSim3对应的键是一样的，这个可以从这两个map的生成中看到
-     *      2. CorrectedSim3对应的关键帧的位姿已经setpose进去了
+     *      2. CorrectedSim3对应的关键帧的位姿已经setpose进去了，也就是经过了尺度修正了
      */
     // Setup optimizer
     g2o::SparseOptimizer optimizer;
@@ -1578,7 +1580,8 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
     vector<g2o::Sim3,Eigen::aligned_allocator<g2o::Sim3> > vCorrectedSwc(nMaxKFid+1);
     vector<g2o::VertexSim3Expmap*> vpVertices(nMaxKFid+1);
 
-    vector<Eigen::Vector3d> vZvectors(nMaxKFid+1); // For debugging
+    // For debugging
+    vector<Eigen::Vector3d> vZvectors(nMaxKFid+1);
     Eigen::Vector3d z_vec;
     z_vec << 0.0, 0.0, 1.0;
 
@@ -1724,7 +1727,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
         for(set<KeyFrame*>::const_iterator sit=sLoopEdges.begin(), send=sLoopEdges.end(); sit!=send; sit++)
         {
             KeyFrame* pLKF = *sit;
-            if(pLKF->mnId<pKF->mnId)
+            if(pLKF->mnId<pKF->mnId)  // 为了避免重复添加，有了顺序后，就只会添加一次
             {
                 g2o::Sim3 Slw;
 
@@ -1754,6 +1757,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
             {
                 if(!pKFn->isBad() && pKFn->mnId<pKF->mnId)
                 {
+                    // 不在前面的LoopConnections构成的边中
                     if(sInsertedEdges.count(make_pair(min(pKF->mnId,pKFn->mnId),max(pKF->mnId,pKFn->mnId))))
                         continue;
 
@@ -1830,7 +1834,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
             continue;
 
         int nIDr;
-        if(pMP->mnCorrectedByKF==pCurKF->mnId)
+        if(pMP->mnCorrectedByKF==pCurKF->mnId)  // 当前关键帧的连接关键帧看到的地图点的这个属性会被赋值为当前关键帧的ID
         {
             nIDr = pMP->mnCorrectedReference;
         }
@@ -1840,7 +1844,7 @@ void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* p
             nIDr = pRefKF->mnId;
         }
         
-        g2o::Sim3 Srw = vScw[nIDr];
+        g2o::Sim3 Srw = vScw[nIDr];  // 如果这个地图点是当前关键帧的连接关键帧看到的，那么其实在correctLoop中已经矫正过一次了
         g2o::Sim3 correctedSwr = vCorrectedSwc[nIDr];
 
         Eigen::Matrix<double,3,1> eigP3Dw = pMP->GetWorldPos().cast<double>();
@@ -1880,7 +1884,7 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
 
     vector<g2o::Sim3,Eigen::aligned_allocator<g2o::Sim3> > vScw(nMaxKFid+1);
     vector<g2o::Sim3,Eigen::aligned_allocator<g2o::Sim3> > vCorrectedSwc(nMaxKFid+1);
-    vector<g2o::VertexSim3Expmap*> vpVertices(nMaxKFid+1);
+    vector<g2o::VertexSim3Expmap*> vpVertices(nMaxKFid+1);  // 调试使用
 
     vector<bool> vpGoodPose(nMaxKFid+1);
     vector<bool> vpBadPose(nMaxKFid+1);
@@ -1959,7 +1963,7 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
 
         const int nIDi = pKFi->mnId;
 
-        if(sIdKF.count(nIDi)) // It has already added in the corrected merge KFs
+        if(sIdKF.count(nIDi)) // It has already added in the vpFixedCorrectedKFs
             continue;
 
         g2o::VertexSim3Expmap* VSim3 = new g2o::VertexSim3Expmap();
@@ -1986,6 +1990,14 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
         vpBadPose[nIDi] = true;
     }
 
+    /**
+     *                 vpFixedKFs      vpFixedCorrectedKFs      vpNonFixedKFs
+     * vpGoodPose        true                 true                 false
+     * vpBadPose         false                true                 true
+     * vCorrectedSwc     true                 true                 false
+     * vScw              false                true                 true
+     */
+
     vector<KeyFrame*> vpKFs;
     vpKFs.reserve(vpFixedKFs.size() + vpFixedCorrectedKFs.size() + vpNonFixedKFs.size());
     vpKFs.insert(vpKFs.end(),vpFixedKFs.begin(),vpFixedKFs.end());
@@ -2008,6 +2020,8 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
         if(vpBadPose[nIDi])
             Swi = vScw[nIDi].inverse();
 
+        // !!!bug: 如果vpBadPose[nIDi]为false，那么Swi可能为单位sim3变换，此时肯定不符合要求
+
         KeyFrame* pParentKFi = pKFi->GetParent();
 
         // Spanning tree edge
@@ -2023,16 +2037,18 @@ void Optimizer::OptimizeEssentialGraph(KeyFrame* pCurKF, vector<KeyFrame*> &vpFi
              *      2. 那么对于O2而言，其与O1的边的观测计算使用的是矫正的位姿；其与O3的边的观测计算使用的是矫正前的位姿
              */
 
-            // 这里的两个判断在于避免一个来自vpFixedKFs，一个来自vpNonFixedKFs
+            // 这里的两个判断在于避免一个来自vpFixedKFs，一个来自vpNonFixedKFs；注意vpFixedKFs来自merge地图中，vpNonFixedKFs来自当前地图，而且两者之间没有关系，因此不要在这两个集合之间构建边
             if(vpGoodPose[nIDi] && vpGoodPose[nIDj])
             {
-                // 这个判断表明两帧都是vpFixedCorrectedKFs或vpFixedKFs，在这种情况下，顶点其实都不优化，bHasRelation最好设置称false
+                // 这个判断表明两帧都是vpFixedCorrectedKFs或vpFixedKFs，在这种情况下，顶点其实都不优化，bHasRelation最好设置称false，否则，即使添加了边，也没有效果
+                // 此时Siw和Sjw都应该使用vCorrectedSwc
                 Sjw = vCorrectedSwc[nIDj].inverse();
                 bHasRelation = true;
             }
             else if(vpBadPose[nIDi] && vpBadPose[nIDj])  // 这个判断表明两帧来自vpFixedCorrectedKFs或vpNonFixedKFs
             {
                 // 这里使用的位姿是矫正前的位姿，也就是TcwBef
+                // 此时Siw和Sjw都应该使用vScw
                 Sjw = vScw[nIDj];
                 bHasRelation = true;
             }
@@ -2311,6 +2327,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
 
                 vIdsOnlyInKF2.push_back(id2);
             }
+            // !!!bug: else才会continue
             continue;
         }
 

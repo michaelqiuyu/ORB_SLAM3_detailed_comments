@@ -219,7 +219,7 @@ public:
         _error = obs-v1->pCamera2->project((v1->estimate().inverse().map(v2->estimate())));
     }
 
-    // virtual void linearizeOplus();
+    // virtual void linearizeOplus();  // 同样没有实现雅克比
 
 };
 

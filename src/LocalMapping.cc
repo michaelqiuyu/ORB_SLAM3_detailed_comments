@@ -1761,9 +1761,9 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         // 5. 承接上一步纯imu优化，按照之前的结果更新了尺度信息及适应重力方向，所以要结合地图进行一次视觉加imu的全局优化，这次带了MP等信息
         // 1.0版本里面不直接赋值了，而是将所有优化后的信息保存到变量里面
         if (priorA!=0.f)  // 第一、第二阶段初始化
-            Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, true, priorG, priorA);
+            Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, nullptr, true, priorG, priorA);
         else  // 第三阶段初始化
-            Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, false);
+            Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, nullptr, false);
     }
 
     std::chrono::steady_clock::time_point t5 = std::chrono::steady_clock::now();
