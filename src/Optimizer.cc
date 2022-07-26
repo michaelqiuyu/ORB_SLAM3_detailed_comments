@@ -2315,6 +2315,7 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
 
             //TODO The 3D position in KF1 doesn't exist
             // KF1中只有这个特征点，没有对应的地图点；有可能是投影匹配时构建的2D-3D匹配，并不要求两个地图点都存在
+            // !!!bug: 从后面的逻辑看到，只有当id1和id2都存在的时候才能成功运行，这里仅仅创建一个id2的顶点，没有实际的意义，而且后面也会被continue，猜测只是调试使用
             if(!pMP2->isBad())
             {
                 g2o::VertexSBAPointXYZ* vPoint2 = new g2o::VertexSBAPointXYZ();
@@ -2327,10 +2328,10 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
 
                 vIdsOnlyInKF2.push_back(id2);
             }
-            // !!!bug: else才会continue
             continue;
         }
 
+        // bAllPoints为true的时候，即使i2<0，也还是会往后面运行
         if(i2<0 && !bAllPoints)
         {
             Verbose::PrintMess("    Remove point -> i2: " + to_string(i2) + "; bAllPoints: " + to_string(bAllPoints), Verbose::VERBOSITY_DEBUG);
@@ -2492,8 +2493,9 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 {
     /**
      * notes:
-     *      1. 这里既要或许序列的关键帧用于IMU约束，也会获取共视图的共视关键帧用于构建局部地图，当然序列关键帧的地图点也在局部地图中
+     *      1. 这里既要获取序列的关键帧用于IMU约束，也会获取共视图的共视关键帧用于构建局部地图，当然序列关键帧的地图点也在局部地图中
      *      2. bRecInit = !mpCurrentKeyFrame->GetMap()->GetIniertialBA2()
+     *      3. bLarge为true表示跟踪的很好
      */
 
     Map* pCurrentMap = pKF->GetMap();
@@ -2505,6 +2507,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
         maxOpt=25;
         opt_it=4;
     }
+    // 最多使用多少个关键帧进行优化
     const int Nd = std::min((int)pCurrentMap->KeyFramesInMap()-2,maxOpt);
     const unsigned long maxKFid = pKF->mnId;
 
@@ -2562,6 +2565,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     }
 
     // Optimizable visual KFs
+    // !!!bug: maxCovKF设置为0，那么lpOptVisKFs中将不会有关键帧，也就是不考虑共视关系，这里可能阈值设置的不合理
     const int maxCovKF = 0;
     for(int i=0, iend=vpNeighsKFs.size(); i<iend; i++)
     {
@@ -2615,7 +2619,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
             break;
     }
 
-    bool bNonFixed = (lFixedKeyFrames.size() == 0);
+    bool bNonFixed = (lFixedKeyFrames.size() == 0);  // 没有作用
 
     // Setup optimizer
     g2o::SparseOptimizer optimizer;
@@ -2624,11 +2628,12 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 
     g2o::BlockSolverX * solver_ptr = new g2o::BlockSolverX(linearSolver);
 
-    if(bLarge)
+    if(bLarge)  // lambda越大，越倾向于使用GN，否则，越倾向于使用梯度下降
     {
         // 跟踪的比较好的情况
         g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
-        // LM算法的lambda值
+        // LM算法的lambda值，此时偏小，接近GN
+        // xc's todo: 查看视频，为什么这样设置？
         solver->setUserLambdaInit(1e-2); // to avoid iterating for finding optimal lambda
         optimizer.setAlgorithm(solver);
     }
@@ -2651,7 +2656,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
         VP->setFixed(false);
         optimizer.addVertex(VP);
 
-        if(pKFi->bImu)
+        if(pKFi->bImu)  // IMU第一阶段初始化后，这个变量就是true了
         {
             VertexVelocity* VV = new VertexVelocity(pKFi);
             VV->setId(maxKFid+3*(pKFi->mnId)+1);
@@ -2687,6 +2692,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
         VP->setFixed(true);
         optimizer.addVertex(VP);
 
+        // 只有添加的vpOptimizableKFs的最后一个关键帧或者最后一个关键帧的前一个关键帧的时候，下面的顶点才会参与构建IMU预积分残差
         if(pKFi->bImu) // This should be done only for keyframe just before temporal window
         {
             VertexVelocity* VV = new VertexVelocity(pKFi);
@@ -2979,11 +2985,12 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     {
         EdgeMono* e = vpEdgesMono[i];
         MapPoint* pMP = vpMapPointEdgeMono[i];
-        bool bClose = pMP->mTrackDepth<10.f;
+        bool bClose = pMP->mTrackDepth<10.f;  // 表明它是一个近点
 
         if(pMP->isBad())
             continue;
 
+        // 条件1：远点，但是重投影误差超过chi2Mono2；条件2；近点，但是重投影误差超过1.5*chi2Mono2；条件3：不在相机前方；无论满足哪一个都要被删除
         if((e->chi2()>chi2Mono2 && !bClose) || (e->chi2()>1.5f*chi2Mono2 && bClose) || !e->isDepthPositive())
         {
             KeyFrame* pKFi = vpEdgeKFMono[i];
@@ -3020,8 +3027,6 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
         return;
     }
 
-
-
     if(!vToErase.empty())
     {
         for(size_t i=0;i<vToErase.size();i++)
@@ -3034,7 +3039,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     }
 
     for(list<KeyFrame*>::iterator lit=lFixedKeyFrames.begin(), lend=lFixedKeyFrames.end(); lit!=lend; lit++)
-        (*lit)->mnBAFixedForKF = 0;
+        (*lit)->mnBAFixedForKF = 0;  // 恢复关键帧的这个属性，后面还会使用到这个关键帧的这个属性
 
     // Recover optimized data
     // Local temporal Keyframes
@@ -3211,7 +3216,7 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
     g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
 
     if (priorG!=0.f)
-        // lambda越大，越倾向于梯度下降算法；反之，越倾向于高斯牛顿算法
+        // lambda越大，越倾向于梯度下降算法；反之，越倾向于高斯牛顿算法；默认值是很小的
         solver->setUserLambdaInit(1e3);
 
     optimizer.setAlgorithm(solver);
@@ -3369,8 +3374,8 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
          * notes:
          *      1. 无论如何都会更新零偏
          *      2. 只有在零偏变化比较大的时候才会重新预积分，零偏变化大，预计分量也会变化，预积分对状态量的导数也会变化
-         *      3. 因此，此时需要重新预积分，更新预积分量（其通过一阶泰勒展开，重新计算的必要性其实不大）以及预计分量对各状态量的导数（如JVg）
-         *      4. 除了在初始化阶段外，一般是不会重新预积分的，因为那样计算量巨大，也丢失了构建预积分量的优势
+         *      3. 因此，此时需要重新预积分，更新预积分量以及预计分量对各状态量的导数（如JVg）
+         *      4. 除了在初始化阶段外，一般是不会重新预积分的，因为那样计算量巨大，也丢失了构建预积分量的优势；在其他阶段，会根据一阶泰勒展开来更新相关状态量
          */
         if ((pKFi->GetGyroBias() - bg.cast<float>()).norm() > 0.01)
         {
@@ -3381,11 +3386,10 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
         else
             pKFi->SetNewBias(b);
 
-
     }
 }
 
-// 地图合并阶段调用: IMU模式，还没有经过第二阶段初始化，地图还不成熟
+// 地图合并阶段调用: IMU模式，还没有经过第三阶段初始化，地图还不成熟
 void Optimizer::InertialOptimization(Map *pMap, Eigen::Vector3d &bg, Eigen::Vector3d &ba, float priorG, float priorA)
 {
     int its = 200; // Check number of iterations
@@ -3879,6 +3883,8 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
 
                 mpObsKFs[pKF]++;
             }
+
+            // 这里没有对非左右目的双目进行处理
         }
     }
 
@@ -3940,6 +3946,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
 
     vector<pair<KeyFrame*,MapPoint*> > vToErase;
     vToErase.reserve(vpEdgesMono.size()+vpEdgesStereo.size());
+    // 调试使用
     set<MapPoint*> spErasedMPs;
     set<KeyFrame*> spErasedKFs;
 
@@ -4000,6 +4007,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame* pMainKF,vector<KeyFrame*> vpAdju
             pMPi->EraseObservation(pKFi);
         }
     }
+
     // 调试代码
     for(unsigned int i=0; i < vpMPs.size(); ++i)
     {
@@ -4199,7 +4207,16 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
         else
             break;
     }
-    // vpOptimizableKFs保存了当前关键帧以及其前5帧，pMergeKF以及其前后各3帧
+    // vpOptimizableKFs保存了当前关键帧以及其前5帧，pMergeKF以及其2后3帧
+
+    /**
+     *       vpOptimizableCovKFs     vpOptimizableKFs
+     *               _     _______________________________
+     * curMap        O     O     O     O     O     O     O
+     * mergeMap                        O     O     O     O     O     O     O
+     *                                 _     _______________________________
+     *                        lFixedKeyFrames         vpOptimizableKFs
+     */
 
     int N = vpOptimizableKFs.size();
 
@@ -4608,7 +4625,7 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
 
         Sophus::SE3d Tiw = pKFi->GetPose().cast<double>();
         g2o::Sim3 g2oSiw(Tiw.unit_quaternion(),Tiw.translation(),1.0);
-        corrPoses[pKFi] = g2oSiw;
+        corrPoses[pKFi] = g2oSiw;  // 保存优化有的位姿
 
         if(pKFi->bImu)
         {
@@ -4660,6 +4677,7 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
 
 int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit)
 {
+    // bRecInit的默认值为false
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolverX::LinearSolverType * linearSolver;
 
@@ -4867,6 +4885,7 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
 
     // We perform 4 optimizations, after each optimization we classify observation as inlier/outlier
     // At the next optimization, outliers are not included, but at the end they can be classified as inliers again.
+    // 每次迭代使用不同的阈值，由粗到细的思想
     float chi2Mono[4]={12,7.5,5.991,5.991};
     float chi2Stereo[4]={15.6,9.8,7.815,7.815};
 
@@ -4904,7 +4923,7 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
             }
 
             const float chi2 = e->chi2();
-            bool bClose = pFrame->mvpMapPoints[idx]->mTrackDepth<10.f;
+            bool bClose = pFrame->mvpMapPoints[idx]->mTrackDepth<10.f;  // 为true表示近点
 
             if((chi2>chi2Mono[it]&&!bClose)||(bClose && chi2>chi2close)||!e->isDepthPositive())
             {

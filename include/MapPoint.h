@@ -171,7 +171,7 @@ public:
     float mTrackProjX;
     float mTrackProjY;
     float mTrackDepth;
-    float mTrackDepthR;
+    float mTrackDepthR; // 记录点在相机系下距离原点的距离
     float mTrackProjXR;
     float mTrackProjYR;
     bool mbTrackInView, mbTrackInViewR;

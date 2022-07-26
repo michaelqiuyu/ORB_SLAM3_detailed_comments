@@ -733,7 +733,7 @@ bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame*
         Sophus::SE3d mTwm = pMatchedKF->GetPoseInverse().cast<double>();
         g2o::Sim3 gSwm(mTwm.unit_quaternion(),mTwm.translation(),1.0);
         g2o::Sim3 gScm = gScw * gSwm;
-        Eigen::Matrix<double, 7, 7> mHessian7x7;
+        Eigen::Matrix<double, 7, 7> mHessian7x7;  // 没有作用，在函数OptimizeSim3中也是一个出参
 
         // 单目情况下不锁定尺度
         bool bFixedScale = mbFixScale;       // TODO CHECK; Solo para el monocular inertial
@@ -1044,7 +1044,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(
                 if(numProjMatches >= nProjMatches)
                 {
                     // Optimize Sim3 transformation with every matches
-                    Eigen::Matrix<double, 7, 7> mHessian7x7;
+                    Eigen::Matrix<double, 7, 7> mHessian7x7;  // 没有作用，在函数OptimizeSim3中也是一个出参
 
                     bool bFixedScale = mbFixScale;
                     // 在imu模式下imu未完成第3阶段初始化就不固定scale
@@ -2517,7 +2517,7 @@ void LoopClosing::MergeLocal2()
         Eigen::Vector3d bg, ba;
         bg << 0., 0., 0.;
         ba << 0., 0., 0.;
-        // 优化当前地图中参数bg,ba
+        // 优化当前地图中速度和零偏bg,ba
         Optimizer::InertialOptimization(pCurrentMap,bg,ba);
         IMU::Bias b (ba[0],ba[1],ba[2],bg[0],bg[1],bg[2]);
         unique_lock<mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
