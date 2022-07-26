@@ -906,7 +906,7 @@
 	1. Robust Kernel的阈值的设置是残差维度的卡方分布0.95p值的数值，原因是什么？
 	2. IMU的世界系是什么，目前只知道Z轴是竖直向上的
 
-git: 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
+git: 
 
 
 分辨率最好调到：640 * 480

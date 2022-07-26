@@ -164,7 +164,7 @@ public:
     }
 };
 
-// xc's todo: 这个节点是在哪里使用的
+// xc's todo: 这个节点是在哪里使用的：4自由度位姿图优化中
 // 优化中关于位姿的节点，4自由度  3个平移加一个航偏
 class VertexPose4DoF : public g2o::BaseVertex<4, ImuCamPose>
 {
@@ -196,6 +196,11 @@ public:
     // 强制让旋转的前两维的更新量为0
     virtual void oplusImpl(const double *update_)
     {
+        /**
+         * 在更新Rwb的时候，有Rw'b = DR * Rwb → Rw'b * Rbw = Rw'w = DR
+         * Rw'w表示了系统的漂移程度，由于重力的影响，系统只有可能在yaw角上发生偏移，世界系的Z轴方向就是重力方向
+         * 因此DR对应的轴角只有yaw角非零，pitch和roll都应该为0
+         */
         double update6DoF[6];
         update6DoF[0] = 0;
         update6DoF[1] = 0;
@@ -504,7 +509,7 @@ public:
         return VPose->estimate().isDepthPositive(Xw, cam_idx);
     }
 
-    // xc's todo: 后面需要查看这个函数的作用是什么？
+    // xc's todo: 后面需要查看这个函数的作用是什么：用于构建边缘化所需的信息矩阵
     Eigen::Matrix<double, 6, 6> GetHessian()
     {
         linearizeOplus();
@@ -584,6 +589,7 @@ public:
 
     virtual void linearizeOplus();
 
+    // 用于构建边缘化所需的信息矩阵
     Eigen::Matrix<double, 6, 6> GetHessian()
     {
         linearizeOplus();
@@ -1017,6 +1023,10 @@ public:
     {
         const VertexPose4DoF *VPi = static_cast<const VertexPose4DoF *>(_vertices[0]);
         const VertexPose4DoF *VPj = static_cast<const VertexPose4DoF *>(_vertices[1]);
+        /**
+         * VPi->estimate().Rcw[0] * (-VPj->estimate().Rcw[0].transpose() * VPj->estimate().tcw[0])：世界系的原点指向相机j的光心的向量在相机i下的向量
+         * VPi->estimate().tcw[0]：世界系原点在相机系的坐标，方向是相机i的原点指向世界系原点
+         */
         _error << LogSO3(VPi->estimate().Rcw[0] * VPj->estimate().Rcw[0].transpose() * dRij.transpose()),
             VPi->estimate().Rcw[0] * (-VPj->estimate().Rcw[0].transpose() * VPj->estimate().tcw[0]) + VPi->estimate().tcw[0] - dtij;
     }

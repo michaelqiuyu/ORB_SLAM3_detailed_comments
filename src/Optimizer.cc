@@ -3161,7 +3161,7 @@ Eigen::MatrixXd Optimizer:: Marginalize(const Eigen::MatrixXd &H, const int &sta
 
     /**
      * notes:
-     *      1. 实际上，下面的操作没必要做，因为，我们不会需要已经被边缘化的变量对应的Hessian matrix了
+     *      1. 实际上，下面的操作没必要做，因为，我们不会需要已经被边缘化的变量对应的HessianMatrix了
      *      2. 当前这样做更具有普遍性，可以实现其他的需求
      *      3. 如果最后我们需要的维度的变量不是连续的（在这里我们最后需要的是最后连续的15维），那么我们仍然拼凑出所需的Hessian matrix，还不如直接在Hn上面block截取，而不是在res上拼凑
      */
@@ -5023,6 +5023,12 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
     // Recover Hessian, marginalize keyFframe states and generate new prior for frame
     Eigen::Matrix<double,15,15> H;
     H.setZero();
+
+    /**
+     * H只保留当前帧的信息，前一关键帧的信息不需要保留
+     * 当前一帧是关键帧的时候，关键帧的位姿、速度、零偏等都不会发生变化，也不会构建约束EdgePriorPoseImu，因此也不会Marginalize
+     * 只需要将当前帧的相关信息保留，留待下一帧进行边缘化的时候使用即可
+     */
 
     // imu的约束产生
     H.block<9,9>(0,0)+= ei->GetHessian2();  // 只保留当前帧的，因此零偏的信息没有保存，因为IMU约束里面的零偏信息是关键帧的
