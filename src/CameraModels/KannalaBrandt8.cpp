@@ -184,11 +184,17 @@ cv::Point3f KannalaBrandt8::unproject(const cv::Point2f &p2D)
     float scale = 1.f;
     float theta_d = sqrtf(pw.x * pw.x + pw.y * pw.y);
     // notes: theta_d >= 0 > -CV_PI一定成立
-    // xc's todo: 这里的判断是什么意思，超过了CV_PI / 2的话，theta_d = CV_PI / 2了，这种时候能够直接进行运算吗？
+    // xc's todo: 这里的判断是什么意思，超过了CV_PI / 2的话，theta_d = CV_PI / 2了，这种时候能够直接进行运算吗？：广角，大于180的FOV
     /**
      * !!!bug:
      *      1. 这个地方疑似是个bug，应该是theta = fminf(fmaxf(-CV_PI / 2.f, theta_d), CV_PI / 2.f);目的是给与theta一个比较好的初值，但是theta为入射角，取值范围在0~pi/2
      *      2. 另外如果这么修改的话，就需要将if中国中的float theta = theta_d;删除
+     *
+     * 上面的描述是错误的，这里这样处理是为了将180°以外的视角屏蔽不要，也就是仅仅处理theta在0~pi/2的场景
+     * 需要查看为什么要这样处理，不屏蔽180°以外的会有什么问题？VINS-MONO中就没有屏蔽180以外的点
+     *
+     * 这里比较奇怪的是，这里不是直接不处理180°以外的特征点，而是将theta_d的值修改了，这样得到的theta显然不可能与p2D对应
+     * 当然，有可能因为theta不可能与p2D对应，因此后面的操作中，会被认为是外点
      */
     theta_d = fminf(fmaxf(-CV_PI / 2.f, theta_d), CV_PI / 2.f);  // 不能超过180度
 
@@ -215,7 +221,6 @@ cv::Point3f KannalaBrandt8::unproject(const cv::Point2f &p2D)
             if (fabsf(theta_fix) < precision)  // 如果更新量变得很小，表示接近最终值
                 break;
         }
-        // scale = theta - theta_d;
         // 求得tan(θ) / θd
         scale = std::tan(theta) / theta_d;
     }
