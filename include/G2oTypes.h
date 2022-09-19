@@ -1003,6 +1003,8 @@ public:
 
 /** 
  * @brief 4DOF的二元边，误差为给定的旋转平移改变量 与 两个输入节点之间的旋转平移改变量的偏差
+ *
+ * 使用的是g2o自带的数值求导的方式
  */
 class Edge4DoF : public g2o::BaseBinaryEdge<6, Vector6d, VertexPose4DoF, VertexPose4DoF>
 {

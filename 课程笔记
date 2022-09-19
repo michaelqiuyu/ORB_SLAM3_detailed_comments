@@ -864,36 +864,60 @@
 				8. pMap->IncreaseChangeIndex()：地图的改变次数递增
 
         8.15 Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit)
-        	8.15.1 
-        	8.15.2 函数调用时机：
-        	8.15.3 参数说明：
+        	8.15.1 在局部建图跟踪中，用于优化当前帧的位姿等信息，使用了前一关键帧的相关信息来约束相关状态量，关键帧的状态量不变
+        	8.15.2 函数调用时机：在局部建图跟踪中，如果IMU已经第一阶段初始化了，并且地图update了
+        	8.15.3 参数说明：bRecInit使用的是默认值false
         	8.15.4 代码逻辑：
-        		1. 
+        		1. 构建优化器，使用g2o::BlockSolverX，并使用LM算法
+        		2. 依据当前帧，构建位姿顶点VertexPose、速度顶点VertexVelocity、陀螺仪零偏顶点VertexGyroBias和加速度零偏顶点VertexAccBias，所有的顶点都是不固定的
+        		3. 构建视觉重投影误差的边，注意是单目还是双目，以及双目是左右目还是非左右目的形式，在这里不再使用Tlr来构建右相机了残差了，这里使用的是Tcb[i]来传递位姿，注意，在IMU模式下的位姿都是IMU坐标系下的位姿，否则才是第一帧相机系下的位姿；注意这里的地图点是不动的
+        		4. 根据前一关键帧构建IMU预积分残差EdgeInertial，但是需要注意的是有关于前一关键帧的顶点都是固定的，只有当前帧的位姿顶点和速度顶点才是可变的；添加EdgeGyroRW约束当前帧的陀螺仪零偏在前一关键帧的陀螺仪零偏附近，添加EdgeAccRW约束当前帧的加速度零偏在前一关键帧的加速度零偏附近
+        		5. 使用4次迭代优化的方式，每一次都计算每条重投影残差边的残差，并将残差大于阈值的边的level设置为1，也就是不参与下一次优化；只有最后一次优化才不使用RobustKernel；并在此过程中，统计内点数量nInliers，并将当前帧的相关地图点设置为外点
+        		6. 如果内点数量不够，那么放大阈值，重新计算内外点，避免将当前帧的太多地图点设置为外点；将优化后的位姿、速度和零偏信息写入到当前帧中
+        		7. 计算当前帧先验的信息矩阵：
+        			7.1 H只保留当前帧的信息，前一关键帧的信息不需要保留
+        			7.2 当前一帧是关键帧的时候，关键帧的位姿、速度、零偏等都不会发生变化，也不会构建约束EdgePriorPoseImu，因此也不会Marginalize
+        			7.3 只需要将当前帧的相关信息保留，留待下一帧进行边缘化的时候使用即可
+        			7.4 从IMU预积分残差边中获取当前帧的位姿顶点和速度顶点的HessianMatrix，从EdgeGyroRW获取当前帧的陀螺仪零偏顶点的HessianMatrix，从EdgeAccRW获取当前帧的加速度零偏顶点的HessianMatrix，从重投影残差边（必须是内点边）中获取位姿顶点的HessianMatrix
+        			7.5 信息矩阵的维度为15*15
 
         8.16 Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
-        	8.16.1 
-        	8.16.2 函数调用时机：
-        	8.16.3 参数说明：
+        	8.16.1 在局部建图跟踪中，用于优化当前帧的位姿等信息，使用了前一帧的相关信息来约束相关状态量，前一帧的状态量也会被优化
+        	8.16.2 函数调用时机：在局部建图跟踪中，如果IMU已经第一阶段初始化了，并且地图没有update
+        	8.16.3 参数说明：bRecInit使用的是默认值false
         	8.16.4 代码逻辑：
-        		1. 
+        		1. 构建优化器，使用g2o::BlockSolverX，并使用LM算法
+        		2. 依据当前帧，构建位姿顶点VertexPose、速度顶点VertexVelocity、陀螺仪零偏顶点VertexGyroBias和加速度零偏顶点VertexAccBias，所有的顶点都是不固定的
+        		3. 构建视觉重投影误差的边，注意是单目还是双目，以及双目是左右目还是非左右目的形式，在这里不再使用Tlr来构建右相机了残差了，这里使用的是Tcb[i]来传递位姿，注意，在IMU模式下的位姿都是IMU坐标系下的位姿，否则才是第一帧相机系下的位姿；注意这里的地图点是不动的
+        		4. 获取当前帧的前一帧，构建位姿顶点VertexPose、速度顶点VertexVelocity、陀螺仪零偏顶点VertexGyroBias和加速度零偏顶点VertexAccBias，所有的顶点都是不固定的
+        		5. 当前帧与前一帧构建IMU预积分残差EdgeInertial；添加EdgeGyroRW约束当前帧的陀螺仪零偏在前一帧的陀螺仪零偏接近，添加EdgeAccRW约束当前帧的加速度零偏在前一帧的加速度零偏接近
+        		6. 构建先验约束EdgePriorPoseImu，这条边的作用是约束前一帧的相关状态量不要大动：
+        			1. 这里的意思是两个连续普通帧联合优化的时候，对前一帧的优化应该使得相关状态量在其pFp->mpcpi附近，而pFp->mpcpi是之前优化的结果
+		            2. 也就是这里的优化主要是优化当前帧，对前一帧的优化应该限制其波动的范围
+		            3. 如果地图发生变动的话就没有这个边的限制了，也就是PoseInertialOptimizationLastKeyFrame中没有这条边
+		        7. 使用4次迭代优化的方式，每一次都计算每条重投影残差边的残差，并将残差大于阈值的边的level设置为1，也就是不参与下一次优化；只有最后一次优化才不使用RobustKernel；并在此过程中，统计内点数量nInliers，并将当前帧的相关地图点设置为外点
+        		8. 如果内点数量不够，那么放大阈值，重新计算内外点，避免将当前帧的太多地图点设置为外点；将优化后的位姿、速度和零偏信息写入到当前帧中
+        		9. 构建当前帧与前一帧的信息矩阵：
+        			9.1 这里的H实际上按照顺序对应着Ti, Vi, bi_g, bi_a, Tj, Vj, bj_g, bj_a，共30维
+		            9.2 ei按照顺序对应着Ti, Vi, bi_g, bi_a, Tj, Vj
+		            9.3 egr按照顺序对应着bi_g, bj_g
+		            9.4 ear按照顺序对应着bi_a, bj_a
+		            9.5 ep按照顺序对应着Ti, Vi, bi_g, bi_a
+		            9.6 按照上面的顺序对应填入数字即可
+		        10. 对获取的信息矩阵进行边缘化，从中获取当前帧相关的信息矩阵快
+		        11. 从边缘化后的信息矩阵中获取有关当前帧的信息矩阵快，然后为当前帧创建ConstraintPoseImu
 
         8.17 Optimizer::OptimizeEssentialGraph4DoF(Map* pMap, KeyFrame* pLoopKF, KeyFrame* pCurKF,
                                        const LoopClosing::KeyFrameAndPose &NonCorrectedSim3,
                                        const LoopClosing::KeyFrameAndPose &CorrectedSim3,
                                        const map<KeyFrame *, set<KeyFrame *> > &LoopConnections)
-            8.17.1 
-        	8.17.2 函数调用时机：
-        	8.17.3 参数说明：
+            8.17.1 在回环矫正中，将地图的漂移均摊到每一个关键帧
+        	8.17.2 函数调用时机：在CorrectLoop函数中，如果是IMU模式并且已经第一阶段初始化了
         	8.17.4 代码逻辑：
-        		1. 
-
-
-
-
-
-
-
-
+        		1. 构建优化器，使用g2o::BlockSolverX，并使用LM算法
+        		2. 获取地图中的所有关键帧并遍历，如果其在CorrectedSim3中，那么就是用矫正后的位姿构建位姿顶点VertexPose4DoF，并将位姿添加到vScw中，否则直接使用关键帧的位姿构建位姿顶点VertexPose4DoF，并将位姿添加到vScw中，固定回环关键帧；注意VertexPose4DoF的自由度为4，对旋转而言，仅仅更新yaw角，而不会更新pitch和roll
+        		3. 遍历LoopConnections，构建因为回环而产生连接的关键帧之间的相对位姿约束的边Edge4DoF；遍历地图中的所有关键帧，构建父子关系的边Edge4DoF，所有回环产生的边Edge4DoF、关键帧与其前一个关键帧构建的边Edge4DoF，关键帧与其共视达到一定数量的共视关键帧构建的边Edge4DoF
+        		4. 执行20次迭代优化；将优化后的位姿更新到关键帧中；对每一个地图点，根据其参考关键帧的位姿，先将坐标转换到参考关键帧（使用原始位姿），然后再使用更新后的位姿将坐标转换到世界系，更新地图点的世界系坐标，重新计算地图点的深度区间和方向
 
 
 
@@ -903,30 +927,14 @@
 
 
 后面需要做的有：
-	1. Robust Kernel的阈值的设置是残差维度的卡方分布0.95p值的数值，原因是什么？
-	2. IMU的世界系是什么，目前只知道Z轴是竖直向上的
+	
 
-git: 
+git: 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
 
 
 分辨率最好调到：640 * 480
 
 
-
-后续重点查看一下：4自由度的本质图优化
-
-零偏的初始值是0，之后帧的初值可以根据上一帧或者上一关键帧
-
-Tracking::PreintegrateIMU
-
-
-// 总结下都在什么时候地图更新，也就是mbMapUpdated为true
-// 1. 回环或融合
-// 2. 局部地图LocalBundleAdjustment
-// 3. IMU三阶段的初始化
-
-
-左右目的形式的相机类型为：Rectified，对应的数据集为KITTI
 
 
 // 这里关注一下
@@ -944,6 +952,8 @@ Tracking::PreintegrateIMU
 	5. 由于更新的并不是零偏，而是零偏的增量，因此零偏是如何更新的，零偏更新后，是否使用一阶泰勒进行展开求解预积分的更新量，当然此时的零偏也已经同步更新了
 	6. 单目+imu模式下可以较快的初始化地图，速度大于ORB2的单目初始化？速度提升来自于哪里？
 	7. 当零偏更新之后，预计分量会根据一阶泰勒公式进行更新，对各状态量的导数（实际上应该根据零偏的变化同步更新）却没有同步更新（初始化的时候有可能重新预积分，之后就不会重新预积分了，认为零偏的波动很小）
+	8. Robust Kernel的阈值的设置是残差维度的卡方分布0.95p值的数值，原因是什么？
+	9. IMU的世界系是什么，目前只知道Z轴是竖直向上的
 
 
 代码尚存疑惑点：
@@ -953,6 +963,11 @@ Tracking::PreintegrateIMU
 notes：
 	1. 多目使用方式，在跟踪中并没有起到作用，仅仅在BA中产生作用
 	2. 在跟踪线程判定为关键帧的时候，如果是多目，会根据多目创建的地图点添加到关键帧之中
+	3. 有一些边没有重载linearizeOplus，使用的是数值求导的方式
+	4. 总结下都在什么时候地图更新，也就是mbMapUpdated为true
+		4.1 回环或融合
+		4.2 局部地图LocalBundleAdjustment
+		4.3 IMU三阶段的初始化
 
 
 	
