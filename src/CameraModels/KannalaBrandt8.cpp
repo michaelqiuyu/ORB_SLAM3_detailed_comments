@@ -166,7 +166,7 @@ Eigen::Vector3f KannalaBrandt8::unprojectEig(const cv::Point2f &p2D)
  *     其中r = sqrt(xc^2 + yc^2)
  *     所以 θd = sqrt(xd^2 + yd^2)  已知
  * 所以待求的只有tan(θ),也就是θ
- * 这里θd = θ + k1*θ^3 + k2*θ^5 + k3*θ^7 + k4*θ^9
+ * 这里θd ~= rd =  θ + k1*θ^3 + k2*θ^5 + k3*θ^7 + k4*θ^9
  * 直接求解θ比较麻烦，这里用迭代的方式通过误差的一阶导数求θ
  * θ的初始值定为了θd，设θ + k1*θ^3 + k2*θ^5 + k3*θ^7 + k4*θ^9 = f(θ)
  * e(θ) = f(θ) - θd 目标是求解一个θ值另e(θ) = 0，实际上任然可以看成是||e(θ)||^2的最优化，按照正常的高斯牛顿进行求解即可得到下面的公式
@@ -195,6 +195,10 @@ cv::Point3f KannalaBrandt8::unproject(const cv::Point2f &p2D)
      *
      * 这里比较奇怪的是，这里不是直接不处理180°以外的特征点，而是将theta_d的值修改了，这样得到的theta显然不可能与p2D对应
      * 当然，有可能因为theta不可能与p2D对应，因此后面的操作中，会被认为是外点
+     *
+     * 需要注意的是rd = f * tan(θd)，并且rd一般很小，f相对较大，因此tan(θd)较小，因此θd = tan(θd)，因此rd = θd
+     * 那么从rd / f = tan(θd)的角度讲，θd一般不会超过np / 2
+     * 参考：https://blog.csdn.net/qq_28087491/article/details/107965151
      */
     theta_d = fminf(fmaxf(-CV_PI / 2.f, theta_d), CV_PI / 2.f);  // 不能超过180度
 

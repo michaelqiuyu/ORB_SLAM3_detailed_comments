@@ -1211,6 +1211,10 @@ namespace ORB_SLAM3
                             // 作者根据kp2金字塔尺度因子(scale^n，scale=1.2，n为层数)定义阈值th
                             // 金字塔层数从0到7，对应距离 sqrt(100*pKF2->mvScaleFactors[kp2.octave]) 是10-20个像素
                             //? 对这个阈值的有效性持怀疑态度
+                            /**
+                             * 对于空间中不同的地图点来说，其在两个相机下的像素坐标经过E的变换后距离ep的距离的程度是不同的
+                             * 从三角测量的原理上说，像素点越接近边缘，其越可能距离ep近，这里使用一个统一的阈值显然不是一个好的策略
+                             */
                             if(distex*distex+distey*distey<100*pKF2->mvScaleFactors[kp2.octave])
                             {
                                 continue;
