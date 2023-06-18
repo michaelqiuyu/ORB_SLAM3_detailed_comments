@@ -890,7 +890,7 @@ void LocalMapping::CreateNewMapPoints()
             // 金字塔尺度因子的比例
             const float ratioOctave = mpCurrentKeyFrame->mvScaleFactors[kp1.octave]/pKF2->mvScaleFactors[kp2.octave];
 
-            // 距离的比例和图像金字塔的比例不应该差太多，否则就跳过
+            // 距离的比例和图像金字塔的比例不应该差太多，否则就跳过：图像分辨率越高，越能够在低尺度看到远的物体
             if(ratioDist*ratioFactor<ratioOctave || ratioDist>ratioOctave*ratioFactor)
                 continue;
 
